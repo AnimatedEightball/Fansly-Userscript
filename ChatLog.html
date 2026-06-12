@@ -1,0 +1,488 @@
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style>
+
+:root {
+  --border-radius-2: 0.5em;
+  --scroll-bar: rgba(0, 0, 0, 0.15);
+  --scroll-bar-track: rgba(0, 0, 0, 0.05);
+  --dark-5: rgb(247, 249, 250);
+  --border-color: rgba(0, 0, 0, 0.05);
+  --dark-blue-1: rgba(86, 102, 120, 1);
+  --blue-1-alpha-2: #2699f728;
+}
+
+html,
+body {
+  color: var(--font-1);
+  font-family: "Roboto", sans-serif;
+  font-size: 16px;
+}
+
+.flex-row {
+  display: flex;
+  flex-direction: row;
+}
+
+.flex-col {
+  display: flex;
+  flex-direction: column;
+}
+
+.flex-center {
+  justify-content: center;
+}
+
+.flex-end {
+  justify-content: flex-end;
+}
+
+.flex-start {
+  justify-content: flex-start;
+}
+
+.flex-space-around {
+  justify-content: space-around;
+}
+
+.flex-space-between {
+  justify-content: space-between;
+}
+
+.flex-align-center {
+  align-items: center;
+}
+
+.flex-align-end {
+  align-items: flex-end;
+}
+
+.flex-align-start {
+  align-items: flex-start;
+}
+
+.flex-align-self-center {
+  align-self: center;
+}
+
+.flex-align-self-start {
+  align-self: flex-start;
+}
+
+.flex-align-self-end {
+  align-self: flex-end;
+}
+
+.flex-align-self-stretch {
+  align-self: stretch;
+}
+
+.flex-0 {
+  flex: 0 0 auto;
+}
+
+.flex-0-1 {
+  flex: 0 1 auto;
+}
+
+.width-3 {
+  width: 3em;
+}
+
+.width-100 {
+  width: 100%;
+}
+
+.max-100 {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.max-50 {
+  max-width: 50%;
+  box-sizing: border-box;
+}
+
+.width-50 {
+  width: 50%;
+}
+
+
+.message.my-message {
+  align-self: flex-end;
+}
+
+.timestamp {
+  margin: 0.1em 0 0 1em;
+  font-size: 0.75em;
+  color: var(--dark-blue-1);
+}
+
+.reply-target {
+  background-color: var(--blue-1-alpha-2);
+}
+
+.timestamp.my-message {
+  align-self: flex-end;
+  margin: 0.1em 1em 0 0;
+}
+
+.message[_ngcontent] {
+  border-radius: var(--border-radius-2);
+  background-color: var(--dark-5);
+  margin: 0.25em 0.5em;
+  max-width: 60%;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 15em;
+  display: flex;
+}
+
+.is-reply[_ngcontent]   .message[_ngcontent] {
+  /* max-width: calc(60% - 2em); */
+  min-width: 13em;
+  width: calc(100% - 2em);
+}
+
+.message-wrapper[_ngcontent] {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: row;
+}
+
+.reply-spacer[_ngcontent] {
+  width: 34px;
+}
+
+[_nghost]   .reply-footer-content[_ngcontent]   app-account-username[_ngcontent]     .display-name {
+  font-weight: 400;
+}
+
+.my-message[_nghost]    > .message-reply-wrapper[_ngcontent]    > .message-text-wrapper[_ngcontent]   .message-wrapper[_ngcontent]   .message[_ngcontent] {
+  background-color: var(--blue-1-alpha-2);
+}
+
+.my-message[_nghost]    > .message-reply-wrapper[_ngcontent]    > .message-wrapper[_ngcontent]   .message[_ngcontent] {
+  background-color: var(--blue-1-alpha-2);
+}
+
+.my-message[_nghost]    > .message-reply-wrapper[_ngcontent]:not(.is-reply)    > .message-wrapper[_ngcontent]   .message[_ngcontent] {
+  align-self: flex-end;
+  justify-content: flex-end;
+}
+
+.my-message[_nghost]   .message-reply-wrapper[_ngcontent]:not(.is-reply)   .message-wrapper[_ngcontent] {
+  justify-content: flex-end;
+}
+
+.my-message[_nghost]   .message-wrapper[_ngcontent]    > .message[_ngcontent] {
+  order: 2;
+}
+
+.message.no-text[_ngcontent] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.message-text-wrapper[_ngcontent] {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.message-text-wrapper.no-text[_ngcontent] {
+  margin-top: -28px;
+  pointer-events: none;
+}
+
+.message-text-wrapper.no-text[_ngcontent]   .tap-backs[_ngcontent] {
+  pointer-events: all;
+}
+
+.is-reply[_ngcontent]   .message-text-wrapper.no-text[_ngcontent] {
+  margin-top: -18px;
+}
+
+.reply-header[_ngcontent] {
+  display: flex;
+  flex-direction: row;
+  flex: 0 0 auto;
+  margin-left: 10px;
+  margin-top: 9px;
+  justify-content: flex-start;
+}
+
+.reply-header.no-text[_ngcontent] {
+  margin-top: 0;
+}
+
+.reply-header-content[_ngcontent] {
+  border-radius: var(--border-radius-2);
+  display: flex;
+  flex-direction: row;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+}
+
+.my-message[_nghost]    > .message-reply-wrapper[_ngcontent]:not(.is-reply)   .reply-header[_ngcontent] {
+  justify-content: flex-end;
+}
+
+.reply-footer[_ngcontent] {
+  display: flex;
+  flex-direction: row;
+  flex: 0 0 auto;
+  margin-top: 2px;
+  justify-content: flex-start;
+}
+
+.reply-footer-content[_ngcontent] {
+  border-radius: var(--border-radius-2);
+  margin: 0em 0.5em;
+  margin-top: -0.5em;
+  margin-bottom: 0.5em;
+  max-width: 60%;
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  min-width: 15em;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+}
+
+.my-message[_nghost]    > .message-reply-wrapper[_ngcontent]:not(.is-reply)   .reply-footer[_ngcontent] {
+  justify-content: flex-end;
+}
+
+.my-message[_nghost]    > .message-reply-wrapper[_ngcontent]:not(.is-reply)   .reply-footer-content[_ngcontent] {
+  justify-content: flex-end;
+}
+
+.reply-avatar[_ngcontent] {
+  width: 1.4em;
+  height: 1.4em;
+}
+
+.message-text[_ngcontent] {
+  padding: 0.35em 0.75em;
+  font-size: 0.9375em;
+  color: var(--font-1);
+  line-height: 1.6em;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  word-break: break-word;
+  -webkit-hyphens: none;
+  hyphens: none;
+}
+
+.emoji[_ngcontent] {
+  width: 24px;
+  height: 24px;
+  transition: transform 150ms ease-in-out;
+  margin: 0.4em;
+  cursor: pointer;
+}
+
+.tap-backs[_ngcontent] {
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-start;
+}
+
+.my-message[_nghost]   .tap-backs[_ngcontent] {
+  justify-content: flex-end;
+}
+
+.liked-type[_ngcontent] {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  color: var(--dark-blue-1);
+  font-size: 0.75em;
+  padding: 0.25em 0.25em 0.25em 0.45em;
+  border-radius: 0.5em;
+  margin-right: 2px;
+  cursor: pointer;
+}
+
+.liked-type.liked[_ngcontent] {
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+}
+
+.liked-type.liked[_ngcontent]:hover {
+  padding: 0.25em 0.25em 0.25em 0.25em;
+}
+
+.liked-type[_ngcontent]:hover   .emoji[_ngcontent] {
+  transform: scale(1.25);
+}
+
+.liked-type[_ngcontent]   .emoji[_ngcontent] {
+  cursor: inherit;
+}
+
+.liked-type.liked[_ngcontent]:hover   .unlike-icon[_ngcontent] {
+  visibility: visible;
+  display: inline;
+}
+
+.overlay-box[_ngcontent] {
+  width: 10px;
+  margin-left: -1em;
+  margin-top: 0.7em;
+  height: calc(100% - 5px);
+  position: absolute;
+  border: 3px solid transparent;
+  border-top-left-radius: 20px;
+  border-bottom-left-radius: 20px;
+  border-left-color: var(--border-color);
+  border-top-color: var(--border-color);
+  border-bottom-color: var(--border-color);
+}
+
+</style>
+</head>
+<body>
+	<app-messages-conversation-route>
+		<app-group-message-container class="message-content" >
+			<div class="message-content-list">
+				<div class="message-collection-wrapper">
+				</div>
+			</div>
+		</app-group-message-container>
+	</app-messages-conversation-route>
+</body>
+<script src="messageData.js"></script>
+<script type="text/javascript">
+
+const createMessageHTML = ({
+  content,
+  createdAt,
+  senderId,
+  inReplyToMessage = null,
+  attachments,
+  likes = [{}],
+  isReply = null
+}) => {
+
+	// recursion happens here, if a parent message was being replied to, grab it here
+	// this code does add some unnecessary divs, that aren't applied in the source, they don't seem to cause a problem, but we can flag them later, so they only output if it's a regular message
+	//we're not gonna bother with a timestamp on the message being replied to, at least for now, you can just search for it if you want the time
+	if(inReplyToMessage) {
+		inReplyToMessage.isReply = 'true';
+		[inReplyToMessage].map(createMessageHTML);
+	}
+
+	const message = document.createElement('template');
+	message.innerHTML =`<app-group-message-collection class="message-collection" >
+		<div class="flex-row width-100">
+			<div class="flex-col width-100">
+				<div class="flex-col width-100">
+					<app-group-message class="${isReply ? 'message-reply':'message'}${senderId==userID ? ' my-message':''}" _nghost="">
+						<div _ngcontent="" class="message-reply-wrapper${isReply ? ' is-reply':''}">
+						${inReplyToMessage? [inReplyToMessage].map(createMessageHTML)[0].innerHTML:''}
+						${attachments!=''? "we've got attachments":''}
+							<div _ngcontent="" class="message-text-wrapper">
+								<div _ngcontent="" class="message-wrapper">
+								${isReply ?
+									`<div _ngcontent="" class="reply-header">
+										<div _ngcontent="" class="reply-header-content">
+											<div _ngcontent="" class="overlay-box"></div>
+										</div>
+									</div>`:''}
+									<div _ngcontent="" class="message">
+										<div _ngcontent="" class="message-text">${content}</div>
+									</div>
+								</div>
+								<div _ngcontent="" class="tap-backs">
+									${likes.map(like => `
+									  <div _ngcontent="" class="liked-type">
+										${(() => {
+    switch (like.type) {
+      case 1:
+        return "❤️";
+      case 2:
+        return "😂";
+      case 3:
+        return "😯";
+      case 4:
+        return "😢";
+      case 5:
+        return "🔥";
+      case 6:
+        return "👍";
+      default:
+        return "👎";
+    }
+  })()}
+									  </div>`
+									).join('')}
+								</div>
+							</div>
+						</div>
+					</app-group-message>
+				</div>
+${!isReply ? `				<div class="timestamp ${senderId==userID ? 'my-message':''}">
+					<span class="margin-right-text"> ${new Date(createdAt * 1000).toLocaleString('en-US', {
+  year: 'numeric',
+  month: 'short',
+  day: '2-digit',
+  hour: 'numeric',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: true
+})} </span>
+				</div>`:''}
+
+			</div>
+		</div>
+	</app-group-message-collection>`.trim();
+
+	//return message.content.firstChild;
+	const messageElement = message.content.firstElementChild;
+
+	return messageElement;
+};
+
+const userID = messageData.userId;
+
+// Create the HTML for each message.
+const messageLog = messageData.messages.map(createMessageHTML);
+
+//console.log (messageLog);
+
+// And add it for each HTML template to the body.
+messageLog.forEach(message => {
+  document.body.querySelector('.message-collection-wrapper').append(message);
+});
+
+
+//Take old, existing, JSON object, merge with new, replace old
+//sort out and remove duplicate objects/arrays
+//Clean out unnecessary fields
+
+//Grab only specific objects from main JSON object
+//const { accountMedia, accountMediaBundles, messages } = json[0].response;
+
+//sort an object by ID values, in descending order (newest first)
+//messages.sort((a, b) => b.id.localeCompare(a.id));
+
+//Select specific array from accountMedia based on it's ID
+function findAccountMediaByID(id) {
+	return accountMedia.find(item => item.id == id);
+}
+//findAccountMediaByID("862941176716603394");
+
+//json[0].response.accountMediaBundles.find(item => item.id = "788576864472932352");
+
+//Select specific array from accountMediaBundles based on it's ID
+function findAccountMediaBundlesByID(id) {
+	return accountMediaBundles.find(item => item.id == id);
+}
+//findAccountMediaBundlesByID("862941177060532224");
+</script>
+</html>
