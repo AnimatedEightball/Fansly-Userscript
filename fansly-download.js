@@ -11,9 +11,9 @@
 // @grant       GM_unregisterMenuCommand
 // @require 	https://cdn.jsdelivr.net/npm/@violentmonkey/dom@2
 // @require     https://cdnjs.cloudflare.com/ajax/libs/mux.js/6.3.0/mux.js
-// @downloadURL https://gist.github.com/M-rcus/a29673a5fcf22afd0e67d549b36496a7/raw/fansly-download.user.js
-// @updateURL   https://gist.github.com/M-rcus/a29673a5fcf22afd0e67d549b36496a7/raw/fansly-download.user.js
-// @homepageURL https://gist.github.com/M-rcus/a29673a5fcf22afd0e67d549b36496a7
+// @downloadURL https://raw.githubusercontent.com/AnimatedEightball/Fansly-Userscript/1c3a6f3781a601492afdab7bbabbe08119a1b120/fansly-download.js
+// @updateURL   https://raw.githubusercontent.com/AnimatedEightball/Fansly-Userscript/1c3a6f3781a601492afdab7bbabbe08119a1b120/fansly-download.js
+// @homepageURL https://github.com/AnimatedEightball/Fansly-Userscript/
 // @icon        https://m.leak.fans/ujs/fansly-icon.png
 // @version     0.9.5
 // @author      M&S
