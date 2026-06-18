@@ -106,7 +106,6 @@ body {
   width: 50%;
 }
 
-
 .message.my-message {
   align-self: flex-end;
 }
@@ -133,13 +132,10 @@ body {
   max-width: 60%;
   display: flex;
   flex-direction: column;
-  width: 100%;
   min-width: 15em;
-  display: flex;
 }
 
 .is-reply[_ngcontent]   .message[_ngcontent] {
-  /* max-width: calc(60% - 2em); */
   min-width: 13em;
   width: calc(100% - 2em);
 }
@@ -207,7 +203,6 @@ body {
   display: flex;
   flex-direction: row;
   flex: 0 0 auto;
-  margin-left: 10px;
   margin-top: 9px;
   justify-content: flex-start;
 }
@@ -221,7 +216,6 @@ body {
   display: flex;
   flex-direction: row;
   flex: 0 0 auto;
-  display: flex;
   align-items: flex-start;
 }
 
@@ -245,9 +239,8 @@ body {
   max-width: 60%;
   display: flex;
   flex-direction: row;
-  width: 100%;
+  width: fit-content;
   min-width: 15em;
-  display: flex;
   align-items: flex-start;
   justify-content: flex-end;
 }
@@ -332,7 +325,7 @@ body {
 
 .overlay-box[_ngcontent] {
   width: 10px;
-  margin-left: -1em;
+  margin-left: -6px;
   margin-top: 0.7em;
   height: calc(100% - 5px);
   position: absolute;
@@ -342,6 +335,15 @@ body {
   border-left-color: var(--border-color);
   border-top-color: var(--border-color);
   border-bottom-color: var(--border-color);
+}
+
+.attachments {
+    padding: 0.35em 0.75em;
+}
+
+.attachment {
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 </style>
@@ -365,27 +367,39 @@ const createMessageHTML = ({
   senderId,
   inReplyToMessage = null,
   attachments,
-  likes = [{}],
+  likes = [],
   isReply = null
 }) => {
 
 	// recursion happens here, if a parent message was being replied to, grab it here
 	// this code does add some unnecessary divs, that aren't applied in the source, they don't seem to cause a problem, but we can flag them later, so they only output if it's a regular message
 	//we're not gonna bother with a timestamp on the message being replied to, at least for now, you can just search for it if you want the time
-	if(inReplyToMessage) {
-		inReplyToMessage.isReply = 'true';
-		[inReplyToMessage].map(createMessageHTML);
-	}
+	const replyHTML = inReplyToMessage
+		? createMessageHTML({
+			...inReplyToMessage,
+			isReply: true
+		  }).innerHTML
+		: '';
+		
+	const attachmentMedia = getAttachmentMedia(attachments);
+	console.log(attachmentMedia);
 
 	const message = document.createElement('template');
-	message.innerHTML =`<app-group-message-collection class="message-collection" >
-		<div class="flex-row width-100">
-			<div class="flex-col width-100">
+	message.innerHTML =`<app-group-message-collection class="message-collection width-100" >
 				<div class="flex-col width-100">
 					<app-group-message class="${isReply ? 'message-reply':'message'}${senderId==userID ? ' my-message':''}" _nghost="">
 						<div _ngcontent="" class="message-reply-wrapper${isReply ? ' is-reply':''}">
-						${inReplyToMessage? [inReplyToMessage].map(createMessageHTML)[0].innerHTML:''}
-						${attachments!=''? "we've got attachments":''}
+						${replyHTML}
+						${attachmentMedia.length > 0 ?
+							`<div class="attachments">
+								${attachmentMedia.map(media => `
+									<div class="attachment">
+										<div>${createFilename(media)}</div>
+									</div>
+								`).join('')}
+							</div>`: ''
+						}
+
 							<div _ngcontent="" class="message-text-wrapper">
 								<div _ngcontent="" class="message-wrapper">
 								${isReply ?
@@ -394,9 +408,10 @@ const createMessageHTML = ({
 											<div _ngcontent="" class="overlay-box"></div>
 										</div>
 									</div>`:''}
-									<div _ngcontent="" class="message">
+								${content ?
+									`<div _ngcontent="" class="message">
 										<div _ngcontent="" class="message-text">${content}</div>
-									</div>
+									</div>`:''}
 								</div>
 								<div _ngcontent="" class="tap-backs">
 									${likes.map(like => `
@@ -422,24 +437,15 @@ const createMessageHTML = ({
 									  </div>`
 									).join('')}
 								</div>
+								${!isReply ? `				<div class="timestamp ${senderId==userID ? 'my-message':''}">
+					<span class="margin-right-text"> ${dateFormatter.format(new Date(createdAt * 1000))} </span>
+				</div>`:''}
 							</div>
 						</div>
 					</app-group-message>
-				</div>
-${!isReply ? `				<div class="timestamp ${senderId==userID ? 'my-message':''}">
-					<span class="margin-right-text"> ${new Date(createdAt * 1000).toLocaleString('en-US', {
-  year: 'numeric',
-  month: 'short',
-  day: '2-digit',
-  hour: 'numeric',
-  minute: '2-digit',
-  second: '2-digit',
-  hour12: true
-})} </span>
-				</div>`:''}
+
 
 			</div>
-		</div>
 	</app-group-message-collection>`.trim();
 
 	//return message.content.firstChild;
@@ -450,39 +456,102 @@ ${!isReply ? `				<div class="timestamp ${senderId==userID ? 'my-message':''}">
 
 const userID = messageData.userId;
 
+const dateFormatter = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric',
+  month: 'short',
+  day: '2-digit',
+  hour: 'numeric',
+  minute: '2-digit',
+  second: '2-digit'
+});
+
+function formatFilenameTimestamp(timestamp)
+{
+    const date = new Date(timestamp * 1000);
+    return date.toISOString().split('T')[0];
+}
+
+function getAttachmentMedia(attachments = []) {
+    return attachments.flatMap(att => {
+	
+		//Single media attachment
+        if (att.contentType === 1) {
+            const media = accountMediaById[att.contentId];
+            return media
+                ? formatMedia(media)
+                : [];
+        }
+
+		//Media bundle attachment
+		if (att.contentType === 2) {
+            const bundle = accountMediaBundleById[att.contentId];
+
+            if (!bundle?.bundleContent) {
+                return [];
+            }
+
+            return bundle.bundleContent
+                .sort((a, b) => a.pos - b.pos)
+				.map(item => {
+                    const media = accountMediaById[item.accountMediaId];
+
+                    return media
+                        ? formatMedia(media, item.pos)
+                        : null;
+                }).filter(Boolean);
+        }
+
+        return [];
+    });
+}
+
+const accountMediaById = Object.fromEntries(
+    messageData.accountMedia.map(item => [item.id, item])
+);
+
+const accountMediaBundleById = Object.fromEntries(
+    messageData.accountMediaBundles.map(bundle => [
+        bundle.id,
+        bundle
+    ])
+);
+
 // Create the HTML for each message.
 const messageLog = messageData.messages.map(createMessageHTML);
 
-//console.log (messageLog);
 
 // And add it for each HTML template to the body.
 messageLog.forEach(message => {
   document.body.querySelector('.message-collection-wrapper').append(message);
 });
 
+function createFilename(media) {
+    const bundlePart =
+        media.bundlePos !== null
+            ? `_${String(media.bundlePos + 1).padStart(2, '0')}_`
+            : '_';
 
-//Take old, existing, JSON object, merge with new, replace old
-//sort out and remove duplicate objects/arrays
-//Clean out unnecessary fields
-
-//Grab only specific objects from main JSON object
-//const { accountMedia, accountMediaBundles, messages } = json[0].response;
-
-//sort an object by ID values, in descending order (newest first)
-//messages.sort((a, b) => b.id.localeCompare(a.id));
-
-//Select specific array from accountMedia based on it's ID
-function findAccountMediaByID(id) {
-	return accountMedia.find(item => item.id == id);
+    return (
+        formatFilenameTimestamp(media.createdAt) +
+        '_' +
+        media.createdAt +
+        bundlePart +
+        media.mediaId +
+        '_' +
+        media.mediaId +
+        '.' +
+        media.extension
+    );
 }
-//findAccountMediaByID("862941176716603394");
 
-//json[0].response.accountMediaBundles.find(item => item.id = "788576864472932352");
-
-//Select specific array from accountMediaBundles based on it's ID
-function findAccountMediaBundlesByID(id) {
-	return accountMediaBundles.find(item => item.id == id);
+function formatMedia(media, bundlePos = null) {
+    return {
+        mediaId: media.mediaId,
+        createdAt: media.createdAt,
+        extension: media.media?.mimetype?.replace(/^[\w]+\//, ''),
+        bundlePos
+    };
 }
-//findAccountMediaBundlesByID("862941177060532224");
+
 </script>
 </html>
