@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Fansly - Download single posts & messages
-// @namespace   github.com/M-rcus
+// @namespace   github.com/AnimatedEightball
 // @match       https://fansly.com/*
 // @grant       unsafeWindow
 // @grant       GM_download
