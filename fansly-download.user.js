@@ -1502,7 +1502,8 @@ function downloadMessages(messages, groupId)
         if (entry?.preview?.variants) delete entry.preview.variants;
     });
 
-    const content = JSON.stringify(messages, null, 2);
+	const content =
+        `window.messageData = ${JSON.stringify(exportData, null, 2)};`;
 
 	//Output must be JSON in a Javascript file so it can be loaded be a local reader HTML
     const blob = new Blob([content], {
