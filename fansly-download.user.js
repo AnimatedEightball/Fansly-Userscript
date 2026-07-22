@@ -1503,7 +1503,7 @@ function downloadMessages(messages, groupId)
     });
 
 	const content =
-        `window.messageData = ${JSON.stringify(exportData, null, 2)};`;
+        `var messageData = ${JSON.stringify(exportData, null, 2)};`;
 
 	//Output must be JSON in a Javascript file so it can be loaded be a local reader HTML
     const blob = new Blob([content], {
