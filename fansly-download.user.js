@@ -15,7 +15,7 @@
 // @updateURL   https://raw.githubusercontent.com/AnimatedEightball/Fansly-Userscript/1c3a6f3781a601492afdab7bbabbe08119a1b120/fansly-download.js
 // @homepageURL https://github.com/AnimatedEightball/Fansly-Userscript/
 // @icon        https://m.leak.fans/ujs/fansly-icon.png
-// @version     0.9.5
+// @version     0.9.5.1
 // @author      M&S
 // @description Work in progress userscript for download media of single posts & message media on Fansly.
 // ==/UserScript==
