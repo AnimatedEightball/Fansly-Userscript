@@ -11,11 +11,11 @@
 // @grant       GM_unregisterMenuCommand
 // @require 	https://cdn.jsdelivr.net/npm/@violentmonkey/dom@2
 // @require     https://cdnjs.cloudflare.com/ajax/libs/mux.js/6.3.0/mux.js
-// @downloadURL https://raw.githubusercontent.com/AnimatedEightball/Fansly-Userscript/1c3a6f3781a601492afdab7bbabbe08119a1b120/fansly-download.js
-// @updateURL   https://raw.githubusercontent.com/AnimatedEightball/Fansly-Userscript/1c3a6f3781a601492afdab7bbabbe08119a1b120/fansly-download.js
+// @downloadURL https://github.com/AnimatedEightball/Fansly-Userscript/raw/refs/heads/main/fansly-download.user.js
+// @updateURL   https://github.com/AnimatedEightball/Fansly-Userscript/raw/refs/heads/main/fansly-download.user.js
 // @homepageURL https://github.com/AnimatedEightball/Fansly-Userscript/
 // @icon        https://m.leak.fans/ujs/fansly-icon.png
-// @version     0.9.5.1
+// @version     0.9.5.2
 // @author      M&S
 // @description Work in progress userscript for download media of single posts & message media on Fansly.
 // ==/UserScript==
