@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name        Fansly - Download single posts & messages
+// @name        Media Bunny Fansly - Download single posts & messages
 // @namespace   github.com/AnimatedEightball
 // @match       https://fansly.com/*
 // @grant       unsafeWindow
@@ -10,12 +10,11 @@
 // @grant       GM_registerMenuCommand
 // @grant       GM_unregisterMenuCommand
 // @require 	https://cdn.jsdelivr.net/npm/@violentmonkey/dom@2
-// @require     https://cdnjs.cloudflare.com/ajax/libs/mux.js/6.3.0/mux.js
-// @downloadURL https://github.com/AnimatedEightball/Fansly-Userscript/raw/refs/heads/main/fansly-download.user.js
-// @updateURL   https://github.com/AnimatedEightball/Fansly-Userscript/raw/refs/heads/main/fansly-download.user.js
+// @downloadURL https://raw.githubusercontent.com/AnimatedEightball/Fansly-Userscript/1c3a6f3781a601492afdab7bbabbe08119a1b120/fansly-download.js
+// @updateURL   https://raw.githubusercontent.com/AnimatedEightball/Fansly-Userscript/1c3a6f3781a601492afdab7bbabbe08119a1b120/fansly-download.js
 // @homepageURL https://github.com/AnimatedEightball/Fansly-Userscript/
 // @icon        https://m.leak.fans/ujs/fansly-icon.png
-// @version     0.9.5.2
+// @version     0.9.6
 // @author      M&S
 // @description Work in progress userscript for download media of single posts & message media on Fansly.
 // ==/UserScript==
@@ -35,11 +34,23 @@ const downloadIconClasses = 'fal fa-fw fa-file-upload fa-rotate-180 pointer';
 const scriptDownload = GM_getValue('SCRIPT_DOWNLOAD', false);
 
 /**
- * When enabled, m3u8 playlists are fetched and transmuxed to MP4 in-browser via mux.js.
- * Disable on lower-end devices to fall back to direct download (lower quality static file).
+ * When enabled, HLS playlists are converted to MP4 in-browser via MediaBunny.
+ *
+ * MediaBunny selects the highest-quality HLS video variant and attempts
+ * to preserve the original encoded video/audio streams where possible.
+ *
+ * Disable on lower-end devices to fall back to direct download
+ * (lower quality static file).
+ *
  * Toggled via the Violentmonkey context menu.
  */
+
 let m3u8Download = GM_getValue('M3U8_DOWNLOAD', true);
+
+const MEDIA_BUNNY_URL =
+    'https://cdn.jsdelivr.net/npm/mediabunny@1.58.0/+esm';
+
+const mediaBunnyPromise = import(MEDIA_BUNNY_URL);
 
 let m3u8MenuCommandId = null;
 function registerMenuCommands()
@@ -245,198 +256,686 @@ async function gmFetch(url, headers = {}, responseType = 'text')
 }
 
 /**
- * Fetches an M3U8 playlist, downloads all TS segments, transmuxes them to MP4
- * using mux.js, and triggers a browser download of the resulting file.
+ * Download an authenticated Fansly HLS stream as MP4 using MediaBunny.
  *
- * @param {String} m3u8Url   URL of the M3U8 playlist (highest quality variant).
- * @param {Object} cookies   Key/value pairs for CloudFront cookies (without the CloudFront- prefix).
- * @param {String} filename  Output filename (without extension).
- * @param {Number} createdAt Unix timestamp in seconds from the API, used to set the file's modified date.
+ * MediaBunny handles:
+ *   - HLS master/media playlist parsing
+ *   - variant/track selection
+ *   - MPEG-TS/fMP4 demuxing
+ *   - MP4 muxing
+ *   - transmuxing/copying where possible
+ *
+ * GM_xmlhttpRequest is used as MediaBunny's fetchFn because Fansly's
+ * CloudFront resources require authentication metadata that should not
+ * be exposed to ordinary cross-origin browser fetches.
+ *
+ * @param {String} m3u8Url
+ * @param {Object} cookies CloudFront metadata without the prefix.
+ * @param {String} filename Filename without extension.
+ * @param {Number} createdAt Fansly Unix timestamp in seconds.
  */
-async function downloadM3u8AsMP4(m3u8Url, cookies, filename, createdAt)
-{
-    const cookieHeader = Object.entries(cookies)
-        .map(([k, v]) => `CloudFront-${k}=${v}`)
+async function downloadM3u8AsMP4(
+    m3u8Url,
+    cookies,
+    filename,
+    createdAt
+) {
+    const {
+        Input,
+        UrlSource,
+        HLS_FORMATS,
+        Output,
+        Mp4OutputFormat,
+        BufferTarget,
+        StreamTarget,
+        Conversion,
+    } = await mediaBunnyPromise;
+
+    const cookieHeader = Object.entries(cookies || {})
+        .map(([key, value]) => `CloudFront-${key}=${value}`)
         .join('; ');
 
-    const sharedHeaders = {
+    const commonHeaders = {
         'Origin': 'https://fansly.com',
         'Referer': 'https://fansly.com/',
         'Cookie': cookieHeader,
     };
 
-    console.log(`[m3u8] Fetching master playlist: ${m3u8Url}`);
-    const masterRes = await gmFetch(m3u8Url, sharedHeaders, 'text');
-    const masterText = masterRes.responseText;
-    const masterBase = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
+    /**
+     * Convert GM_xmlhttpRequest's raw response headers into a
+     * standard Headers object.
+     */
+    function parseResponseHeaders(rawHeaders) {
+        const headers = new Headers();
 
-    // If this is a master playlist, pick the highest-bandwidth variant stream.
-    let variantUrl = m3u8Url;
-    if (masterText.includes('#EXT-X-STREAM-INF')) {
-        const lines = masterText.split('\n').map(l => l.trim());
-        let bestBandwidth = -1;
-        for (let i = 0; i < lines.length; i++) {
-            if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
-            const bwMatch = lines[i].match(/BANDWIDTH=(\d+)/);
-            const bandwidth = bwMatch ? parseInt(bwMatch[1], 10) : 0;
-            const uri = lines[i + 1];
-            if (uri && !uri.startsWith('#') && bandwidth > bestBandwidth) {
-                bestBandwidth = bandwidth;
-                variantUrl = uri.startsWith('http') ? uri : masterBase + uri;
+        if (!rawHeaders) {
+            return headers;
+        }
+
+        for (const line of rawHeaders.split(/\r?\n/)) {
+            const separator = line.indexOf(':');
+
+            if (separator === -1) {
+                continue;
+            }
+
+            const name = line.slice(0, separator).trim();
+            const value = line.slice(separator + 1).trim();
+
+            if (name) {
+                headers.append(name, value);
             }
         }
-        console.log(`[m3u8] Selected variant stream (bandwidth ${bestBandwidth}): ${variantUrl}`);
+
+        return headers;
     }
 
-    // Fetch the variant (media) playlist to get the segment list.
-    const playlistRes = variantUrl === m3u8Url
-        ? { responseText: masterText }
-        : await gmFetch(variantUrl, sharedHeaders, 'text');
-    const playlistText = playlistRes.responseText;
+    /**
+     * Fetch implementation supplied to MediaBunny.
+     *
+     * UrlSource can accept a custom fetch function. This lets the
+     * HLS parser continue to use MediaBunny's normal URL/range/
+     * prefetch machinery while every actual HTTP request goes
+     * through GM_xmlhttpRequest.
+     */
+    function authenticatedFetch(input, init = {}) {
+        let url;
 
-    // Resolve segment URLs (may be relative or absolute).
-    const variantBase = variantUrl.substring(0, variantUrl.lastIndexOf('/') + 1);
-    const segmentUrls = playlistText
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0 && !line.startsWith('#'))
-        .map(line => line.startsWith('http') ? line : variantBase + line);
-
-    if (segmentUrls.length === 0) {
-        console.error('[m3u8] No segments found in playlist.');
-        return;
-    }
-
-    console.log(`[m3u8] Found ${segmentUrls.length} segments. Transmuxing to MP4...`);
-
-    const transmuxer = new muxjs.mp4.Transmuxer();
-    const mp4Chunks = [];
-
-    // initSegment is only emitted on the first flush. Prepend it once, then
-    // append only the data portion from subsequent flushes to avoid duplicate
-    // MOOV atoms (one per segment) that confuse players and tools like ffprobe.
-    let initSegmentWritten = false;
-    // mux.js does not include duration on the 'data' segment object.
-    // Instead, accumulate from videoSegmentTimingInfo (end.pts in 90kHz ticks).
-    // Fall back to audioSegmentTimingInfo if there is no video track.
-    let videoDuration90k = 0;
-    let audioDuration90k = 0;
-    transmuxer.on('videoSegmentTimingInfo', info => {
-        videoDuration90k = Math.max(videoDuration90k, info.end.pts);
-    });
-    transmuxer.on('audioSegmentTimingInfo', info => {
-        audioDuration90k = Math.max(audioDuration90k, info.end.pts);
-    });
-    transmuxer.on('data', segment => {
-        if (!initSegmentWritten && segment.initSegment.byteLength > 0) {
-            mp4Chunks.push(new Uint8Array(segment.initSegment));
-            initSegmentWritten = true;
-        }
-        mp4Chunks.push(new Uint8Array(segment.data));
-    });
-
-    for (let i = 0; i < segmentUrls.length; i++) {
-        const segUrl = segmentUrls[i];
-        console.log(`[m3u8] Fetching segment ${i + 1}/${segmentUrls.length}`);
-        const segRes = await gmFetch(segUrl, sharedHeaders, 'arraybuffer');
-        transmuxer.push(new Uint8Array(segRes.response));
-    }
-
-    transmuxer.flush();
-
-    // Concatenate all chunks into a single Uint8Array.
-    const totalLength = mp4Chunks.reduce((sum, c) => sum + c.byteLength, 0);
-    const mp4Data = new Uint8Array(totalLength);
-    let writeOffset = 0;
-    for (const chunk of mp4Chunks) {
-        mp4Data.set(chunk, writeOffset);
-        writeOffset += chunk.byteLength;
-    }
-
-    const totalDuration90k = videoDuration90k || audioDuration90k;
-    console.log(`[m3u8] Transmux complete. Total size: ${(totalLength / 1024 / 1024).toFixed(2)} MB. Duration: ${(totalDuration90k / 90000).toFixed(2)}s. Triggering download...`);
-
-    patchMp4Timestamps(mp4Data, createdAt, totalDuration90k);
-
-    const file = new File([mp4Data], `${filename}.mp4`, {
-        type: 'video/mp4',
-        lastModified: createdAt * 1000,
-    });
-    const blobUrl = URL.createObjectURL(file);
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = `${filename}.mp4`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(blobUrl);
-}
-
-/**
- * Recursively walks MP4 boxes within [start, end) and patches creation_time
- * and modification_time in mvhd and tkhd boxes.
- *
- * @param {DataView} view
- * @param {Number} start Byte offset of first child box
- * @param {Number} end   Byte offset of end of parent box
- * @param {Number} macTimestamp Seconds since Mac epoch (Jan 1 1904)
- * @param {Number} duration90k Total duration in 90kHz ticks (mvhd/tkhd timescale)
- */
-function patchBoxes(view, start, end, macTimestamp, duration90k)
-{
-    let i = start;
-    while (i + 8 <= end) {
-        const boxSize = view.getUint32(i, false);
-        const boxType = view.getUint32(i + 4, false);
-        if (boxSize < 8) break;
-
-        if (boxType === 0x6D766864) { // 'mvhd'
-            // version(1)+flags(3)+creation(4)+modification(4)+timescale(4)+duration(4)
-            view.setUint32(i + 12, macTimestamp, false); // creation_time
-            view.setUint32(i + 16, macTimestamp, false); // modification_time
-            view.setUint32(i + 24, duration90k >>> 0, false); // duration (after timescale)
-        } else if (boxType === 0x746B6864) { // 'tkhd'
-            // version(1)+flags(3)+creation(4)+modification(4)+track_id(4)+reserved(4)+duration(4)
-            view.setUint32(i + 12, macTimestamp, false); // creation_time
-            view.setUint32(i + 16, macTimestamp, false); // modification_time
-            view.setUint32(i + 28, duration90k >>> 0, false); // duration (after track_id+reserved)
-        } else if (boxType === 0x74726163 || boxType === 0x6D646961) { // 'trak' or 'mdia'
-            patchBoxes(view, i + 8, i + boxSize, macTimestamp, duration90k);
+        if (typeof input === 'string') {
+            url = input;
+        } else if (input instanceof URL) {
+            url = input.href;
+        } else if (input instanceof Request) {
+            url = input.url;
+        } else {
+            url = String(input);
         }
 
-        i += boxSize;
-    }
-}
+        const requestHeaders = {
+            ...commonHeaders,
+        };
 
-/**
- * Patches the creation_time and modification_time fields in the mvhd and tkhd
- * MP4 boxes of a transmuxed Uint8Array in-place, so tools like ffprobe report
- * the correct date instead of a pre-1970 timestamp emitted by mux.js.
- *
- * @param {Uint8Array} mp4Data
- * @param {Number} createdAt Unix timestamp in seconds
- * @param {Number} duration90k Total duration in 90kHz ticks from transmuxer
- */
-function patchMp4Timestamps(mp4Data, createdAt, duration90k)
-{
-    // MP4 stores time as seconds since Mac epoch (Jan 1 1904), not Unix epoch
-    const macTimestamp = (createdAt + 2082844800) >>> 0;
-    const view = new DataView(mp4Data.buffer, mp4Data.byteOffset, mp4Data.byteLength);
+        /*
+         * Copy headers supplied by MediaBunny/requestInit.
+         */
+        if (init.headers) {
+            const suppliedHeaders = new Headers(init.headers);
 
-    let i = 0;
-    while (i + 8 <= mp4Data.byteLength) {
-        const boxSize = view.getUint32(i, false);
-        const boxType = view.getUint32(i + 4, false);
-        if (boxSize < 8) break;
-
-        if (boxType === 0x6D6F6F76) { // 'moov'
-            patchBoxes(view, i + 8, i + boxSize, macTimestamp, duration90k);
-            break;
+            suppliedHeaders.forEach((value, key) => {
+                requestHeaders[key] = value;
+            });
         }
 
-        i += boxSize;
+        /*
+         * A Request passed to fetchFn can also contain headers.
+         */
+        if (input instanceof Request) {
+            input.headers.forEach((value, key) => {
+                requestHeaders[key] = value;
+            });
+        }
+
+        /*
+         * MediaBunny can issue Range requests. Preserve that header.
+         */
+        if (init.headers instanceof Headers) {
+            const range = init.headers.get('Range');
+
+            if (range) {
+                requestHeaders.Range = range;
+            }
+        }
+
+        /*
+         * GM_xmlhttpRequest doesn't directly use AbortSignal in all
+         * Violentmonkey versions, so keep a reference to the request
+         * and connect AbortSignal when possible.
+         */
+        return new Promise((resolve, reject) => {
+            let settled = false;
+
+            const finishReject = error => {
+                if (settled) {
+                    return;
+                }
+
+                settled = true;
+                reject(error);
+            };
+
+            const finishResolve = response => {
+                if (settled) {
+                    return;
+                }
+
+                settled = true;
+                resolve(response);
+            };
+
+			const requestStart = performance.now();
+
+			console.log(
+				'[MediaBunny HTTP] START',
+				init.method || 'GET',
+				url,
+				init.headers instanceof Headers
+					? `Range=${init.headers.get('Range') || 'none'}`
+					: ''
+			);
+
+
+            const request = GM_xmlhttpRequest({
+                method: init.method || 'GET',
+                url,
+                headers: requestHeaders,
+                responseType: 'arraybuffer',
+
+				onload: response => {
+					const elapsed =
+						(performance.now() - requestStart) / 1000;
+
+					console.log(
+						'[MediaBunny HTTP] DONE',
+						`status=${response.status}`,
+						`time=${elapsed.toFixed(2)}s`,
+						url
+					);
+
+					if (response.status === 429) {
+						console.warn(
+							'[MediaBunny HTTP] 429 RATE LIMITED',
+							url,
+							response.responseHeaders
+						);
+					} else if (response.status >= 400) {
+						console.warn(
+							'[MediaBunny HTTP] HTTP ERROR',
+							response.status,
+							url,
+							response.responseHeaders
+						);
+					}
+
+					const body = response.response instanceof ArrayBuffer
+						? response.response
+						: new ArrayBuffer(0);
+
+					finishResolve(
+                        new Response(body, {
+                            status: response.status,
+                            statusText: response.statusText,
+                            headers: parseResponseHeaders(
+                                response.responseHeaders
+                            ),
+                        })
+                    );
+                },
+
+				onerror: () => {
+					console.warn(
+						'[MediaBunny HTTP] NETWORK ERROR',
+						url,
+						`after ${((performance.now() - requestStart) / 1000).toFixed(2)}s`
+					);
+
+					finishReject(
+
+                        new TypeError(
+                            `Network error while fetching ${url}`
+                        )
+                    );
+                },
+
+				ontimeout: () => {
+					console.warn(
+						'[MediaBunny HTTP] TIMEOUT',
+						url,
+						`after ${((performance.now() - requestStart) / 1000).toFixed(2)}s`
+					);
+                    finishReject(
+                        new TypeError(
+                            `Timeout while fetching ${url}`
+                        )
+                    );
+                },
+
+                onabort: () => {
+                    finishReject(
+                        new DOMException(
+                            'The request was aborted.',
+                            'AbortError'
+                        )
+                    );
+                },
+            });
+
+            /*
+             * Connect MediaBunny's AbortSignal to the GM request.
+             */
+            if (init.signal) {
+                if (init.signal.aborted) {
+                    request.abort();
+                    return;
+                }
+
+                init.signal.addEventListener(
+                    'abort',
+                    () => {
+                        try {
+                            request.abort();
+                        } catch {
+                            // Ignore abort cleanup failures.
+                        }
+                    },
+                    { once: true }
+                );
+            }
+        });
+    }
+
+    console.log(
+        `[MediaBunny] Loading HLS playlist: ${m3u8Url}`
+    );
+
+    /*
+     * UrlSource supports custom fetchFn. This is the key piece that
+     * allows MediaBunny to work with the authenticated Fansly CDN.
+     *
+     * Keep parallelism relatively low because Fansly/CDN rate limiting
+     * is preferable to launching a large number of simultaneous
+     * segment requests.
+     */
+    const source = new UrlSource(m3u8Url, {
+        fetchFn: authenticatedFetch,
+
+        maxCacheSize: 8 * 1024 * 1024,
+
+        parallelism: 6,
+
+        getRetryDelay: previousAttempts => {
+            /*
+             * Exponential retry delay, capped at 30 seconds.
+             */
+            return Math.min(
+                2 ** previousAttempts,
+                30
+            );
+        },
+    });
+
+    const input = new Input({
+        source,
+        formats: HLS_FORMATS,
+    });
+
+    /*
+     * Ask MediaBunny to inspect the HLS master playlist and select
+     * the highest-resolution video track.
+     *
+     * MediaBunny flattens HLS variants into tracks, so we don't have
+     * to manually parse EXT-X-STREAM-INF ourselves.
+     */
+    const videoTracks = await input.getVideoTracks({
+        sortBy: async track => {
+            return -(await track.getDisplayHeight());
+        },
+    });
+
+    if (!videoTracks.length) {
+        throw new Error(
+            'MediaBunny found no video tracks in the HLS playlist.'
+        );
+    }
+
+    const videoTrack = videoTracks[0];
+
+    const width = await videoTrack.getDisplayWidth();
+    const height = await videoTrack.getDisplayHeight();
+
+    /*
+     * Select the audio track paired with the chosen video variant.
+     */
+    const audioTrack =
+        await videoTrack.getPrimaryPairableAudioTrack();
+
+    console.log(
+        `[MediaBunny] Selected HLS video: ${width}x${height}`
+    );
+
+    if (audioTrack) {
+        console.log(
+            '[MediaBunny] Found matching audio track.'
+        );
+    } else {
+        console.warn(
+            '[MediaBunny] No matching audio track found.'
+        );
+    }
+
+    /*
+     * Use the File System Access API for high-resolution video so that
+     * the MP4 does not need to exist entirely in browser memory.
+     *
+     * We intentionally do not calculate duration here. Computing exact
+     * duration can require scanning the underlying HLS media and adds
+     * unnecessary work before conversion begins.
+     */
+    const shouldPreferFileTarget =
+        typeof window.showSaveFilePicker === 'function' &&
+        height >= 1080;
+
+    /*
+     * PERFORMANCE EXPERIMENT:
+     *
+     * Use MediaBunny StreamTarget backed by an Origin Private File
+     * System (OPFS) file.
+     *
+     * This intentionally avoids showSaveFilePicker() so that we can
+     * test StreamTarget independently of the browser's user-visible
+     * file picker.
+     *
+     * This is experimental and is NOT the final download destination.
+     */
+	let target;
+	let fileHandle = null;
+	let writable = null;
+	let usingStreamTarget = false;
+
+	if (!navigator.storage?.getDirectory) {
+		throw new Error(
+			'OPFS is not available in this browser.'
+		);
+	}
+
+	const opfsRoot = await navigator.storage.getDirectory();
+
+	const opfsFilename =
+		`fansly-mediabunny-${Date.now()}-${filename}.mp4`;
+
+	fileHandle = await opfsRoot.getFileHandle(
+		opfsFilename,
+		{
+			create: true,
+		}
+	);
+
+	writable = await fileHandle.createWritable();
+
+	target = new StreamTarget(writable, {
+		chunked: true,
+		chunkSize: 16 * 1024 * 1024,
+	});
+
+	usingStreamTarget = true;
+
+	console.log(
+		`[MediaBunny] Using OPFS StreamTarget: ${opfsFilename}`
+	);
+
+
+    const output = new Output({
+        format: new Mp4OutputFormat(),
+        target,
+    });
+
+    /*
+     * HLS inputs default to their primary tracks, but explicitly
+     * selecting the desired track set here makes the intent clear.
+     *
+     * We use the selected video track and its matching audio track.
+     */
+    const conversion = await Conversion.init({
+        input,
+        output,
+
+        /*
+         * This is important: don't transcode unless MediaBunny needs
+         * to. For compatible HLS codecs this can remain a fast
+         * transmux/container conversion.
+         */
+        copy: {
+            mode: 'preferred',
+        },
+
+        video: async track => {
+            if (track !== videoTrack) {
+                return {
+                    discard: true,
+                };
+            }
+
+            return {};
+        },
+
+        audio: async track => {
+            if (!audioTrack || track !== audioTrack) {
+                return {
+                    discard: true,
+                };
+            }
+
+            return {};
+        },
+    });
+
+    if (!conversion.isValid) {
+        const discarded = conversion.discardedTracks
+            .map(item => {
+                return `${String(item.track)}: ${item.reason}`;
+            })
+            .join('\n');
+
+        throw new Error(
+            `MediaBunny conversion is invalid.\n\n` +
+            `Discarded tracks:\n${discarded || '(none)'}`
+        );
+    }
+
+		console.log(
+			`[MediaBunny] Converting ${filename}.mp4`
+		);
+
+		let lastLoggedPercent = -1;
+
+		conversion.onProgress = progress => {
+			const percent = Math.floor(progress * 100);
+
+			/*
+			 * Only log every 5%.
+			 *
+			 * This keeps the console useful without generating hundreds
+			 * of messages during a large conversion.
+			 */
+			if (percent >= lastLoggedPercent + 5 || percent === 100) {
+				lastLoggedPercent = percent;
+
+				console.log(
+					`[MediaBunny] ${percent}%`
+				);
+			}
+		};
+
+		const conversionStart = performance.now();
+
+		console.log(
+			`[MediaBunny] Starting conversion at ` +
+			`${new Date().toLocaleTimeString()}`
+		);
+
+		try {
+			await conversion.execute();
+
+			const conversionSeconds =
+				(performance.now() - conversionStart) / 1000;
+
+			console.log(
+				`[MediaBunny] Conversion completed in ` +
+				`${conversionSeconds.toFixed(2)} seconds ` +
+				`(${(conversionSeconds / 60).toFixed(2)} minutes)`
+			);
+
+
+
+        /*
+         * StreamTarget has already written the MP4 to disk.
+         */
+        if (usingStreamTarget) {
+			writable = null;
+
+			const file = await fileHandle.getFile();
+
+            console.log(
+                `[MediaBunny] Finished OPFS streaming ${filename}.mp4`
+            );
+
+            console.log(
+                `[MediaBunny] OPFS output size: ` +
+                `${(file.size / 1024 / 1024).toFixed(2)} MiB`
+            );
+
+            console.log(
+                `[MediaBunny] OPFS output type: ${file.type}`
+            );
+
+            /*
+             * Temporary test only:
+             *
+             * Download the completed OPFS file so we can verify that
+             * the resulting MP4 is valid.
+             *
+             * This creates a Blob URL only AFTER conversion has
+             * completed, rather than keeping the entire output in
+             * MediaBunny's BufferTarget.
+             */
+            const blobUrl = URL.createObjectURL(file);
+
+            const link = document.createElement('a');
+
+            link.href = blobUrl;
+            link.download = `${filename}.mp4`;
+            link.style.display = 'none';
+
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+
+            setTimeout(() => {
+                URL.revokeObjectURL(blobUrl);
+            }, 60_000);
+
+            /*
+             * Remove the temporary OPFS file after giving the browser
+             * time to initiate the download.
+             */
+            setTimeout(async () => {
+                try {
+                    await opfsRoot.removeEntry(opfsFilename);
+
+                    console.log(
+                        `[MediaBunny] Removed temporary OPFS file: ` +
+                        `${opfsFilename}`
+                    );
+                } catch (error) {
+                    console.warn(
+                        '[MediaBunny] Could not remove temporary OPFS file.',
+                        error
+                    );
+                }
+            }, 60_000);
+
+            return;
+        }
+
+
+        /*
+         * BufferTarget contains the completed MP4.
+         */
+        const buffer = target.buffer;
+
+        if (!buffer) {
+            throw new Error(
+                'MediaBunny completed conversion but produced ' +
+                'no output buffer.'
+            );
+        }
+
+        /*
+         * IMPORTANT:
+         *
+         * The File's lastModified value is deliberately based on
+         * Fansly's createdAt timestamp rather than Date.now().
+         *
+         * createdAt is Unix seconds, while File.lastModified uses
+         * Unix milliseconds.
+         */
+        const file = new File(
+            [buffer],
+            `${filename}.mp4`,
+            {
+                type: 'video/mp4',
+                lastModified: createdAt * 1000,
+            }
+        );
+
+        const blobUrl = URL.createObjectURL(file);
+
+        const link = document.createElement('a');
+
+        link.href = blobUrl;
+        link.download = `${filename}.mp4`;
+        link.style.display = 'none';
+
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+
+        /*
+         * Give the browser plenty of time to begin the download before
+         * releasing the object URL.
+         */
+        setTimeout(() => {
+            URL.revokeObjectURL(blobUrl);
+        }, 60_000);
+
+        console.log(
+            `[MediaBunny] Finished ${filename}.mp4 ` +
+            `(${(buffer.byteLength / 1024 / 1024).toFixed(2)} MiB)`
+        );
+
+        try {
+            input.dispose();
+        } catch {
+            // Ignore disposal errors.
+        }
+
+    } catch (error) {
+        /*
+         * If StreamTarget was being used, abort the underlying file
+         * instead of leaving a partially-written MP4 behind.
+         */
+        if (writable) {
+            try {
+                await writable.abort();
+            } catch {
+                // Ignore cleanup errors.
+            }
+
+            writable = null;
+        }
+
+        /*
+         * Dispose the input so UrlSource can stop outstanding requests.
+         */
+        try {
+            input.dispose();
+        } catch {
+            // Ignore disposal errors.
+        }
+
+        throw error;
     }
 }
+
 
 /**
  * Returns true if the media object has a resolvable download URL,
@@ -583,22 +1082,50 @@ function extractMediaAndPreview(input, accountMedia, createdAt, media, metaType)
 
     console.log(`Found file: ${finalFilename} - Triggering download...`);
 
-    if (!scriptDownload) {
-        // For mp4s backed by an M3U8 playlist, transmux in-browser via mux.js (if enabled).
-        const m3u8Info = m3u8Download && filetype === 'mp4' && media.variants ? getM3u8Info(media) : null;
-        if (m3u8Info) {
-            const filenameNoExt = finalFilename.replace(/\.mp4$/, '');
-            downloadM3u8AsMP4(m3u8Info.url, m3u8Info.cookies, filenameNoExt, createdAt);
-        } else {
-            GM_download({
-                method: 'GET',
-                url: url,
-                name: finalFilename,
-                saveAs: false,
-            });
-        }
-    }
-    else {
+	if (!scriptDownload) {
+		/*
+		 * For MP4 media backed by an HLS playlist, use MediaBunny when
+		 * enabled. Otherwise retain the original direct-file download.
+		 */
+		const m3u8Info =
+			m3u8Download &&
+			filetype === 'mp4' &&
+			media.variants
+				? getM3u8Info(media)
+				: null;
+
+		if (m3u8Info) {
+			const filenameNoExt =
+				  finalFilename.replace(/\.mp4$/i, '');
+
+			/*
+			 * Intentionally don't await this.
+			 *
+			 * filterMedia() historically triggers downloads in the
+			 * background, and preserving that behavior means multiple
+			 * media items can begin downloading without blocking the
+			 * iteration.
+			 */
+			downloadM3u8AsMP4(
+				m3u8Info.url,
+				m3u8Info.cookies,
+				filenameNoExt,
+				createdAt
+			).catch(error => {
+				console.error(
+					`[MediaBunny] Failed to download ${finalFilename}:`,
+					error
+				);
+			});
+		} else {
+			GM_download({
+				method: 'GET',
+				url: url,
+				name: finalFilename,
+				saveAs: false,
+			});
+		}
+	} else {
         cmds.push(downloadCmd);
     }
 }
