@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name        Media Bunny Fansly - Download single posts & messages
+// @name        Fansly - Download single posts & messages
 // @namespace   github.com/AnimatedEightball
 // @match       https://fansly.com/*
 // @grant       unsafeWindow
@@ -14,7 +14,7 @@
 // @updateURL   https://github.com/AnimatedEightball/Fansly-Userscript/raw/refs/heads/main/fansly-download.user.js
 // @homepageURL https://github.com/AnimatedEightball/Fansly-Userscript/
 // @icon        https://m.leak.fans/ujs/fansly-icon.png
-// @version     0.9.6
+// @version     0.9.6a
 // @author      M&S
 // @description Work in progress userscript for download media of single posts & message media on Fansly.
 // ==/UserScript==
@@ -51,6 +51,7 @@ const MEDIA_BUNNY_URL =
     'https://cdn.jsdelivr.net/npm/mediabunny@1.58.0/+esm';
 
 const mediaBunnyPromise = import(MEDIA_BUNNY_URL);
+const BUFFER_TARGET_MAX_BYTES = 100 * 1024 * 1024;
 
 let m3u8MenuCommandId = null;
 function registerMenuCommands()
@@ -187,7 +188,26 @@ function getM3u8Info(media)
     const location = playlist.locations[0];
     // location.location is the master playlist URL; downloadM3u8AsMP4 will
     // resolve the highest-quality variant stream from it at download time.
-    return { url: location.location, cookies: location.metadata };
+	
+	let metadata = null;
+
+    try {
+        metadata = playlist.metadata
+            ? JSON.parse(playlist.metadata)
+            : null;
+    } catch (error) {
+        console.warn(
+            '[MediaBunny] Could not parse HLS metadata:',
+            playlist.metadata,
+            error
+        );
+    }
+	
+	return {
+        url: location.location,
+        cookies: location.metadata,
+        duration: metadata?.duration ?? null,
+    };
 }
 
 function getVideoDownloadCommand(media, filename, asCurl)
@@ -197,7 +217,7 @@ function getVideoDownloadCommand(media, filename, asCurl)
         return null;
     }
 
-    const { url, cookies } = info;
+    const { url, cookies, duration } = info;
     const cookieHeader = Object.entries(cookies).map(([k, v]) => `CloudFront-${k}=${v}`).join('; ');
 
     if (asCurl) {
@@ -278,7 +298,8 @@ async function downloadM3u8AsMP4(
     m3u8Url,
     cookies,
     filename,
-    createdAt
+    createdAt,
+    fanslyDuration
 ) {
     const {
         Input,
@@ -287,7 +308,7 @@ async function downloadM3u8AsMP4(
         Output,
         Mp4OutputFormat,
         BufferTarget,
-        StreamTarget,
+		StreamTarget,
         Conversion,
     } = await mediaBunnyPromise;
 
@@ -423,6 +444,14 @@ async function downloadM3u8AsMP4(
 					: ''
 			);
 
+			console.log(
+				'[MediaBunny HTTP] REQUEST HEADERS',
+				{
+					url,
+					method: init.method || 'GET',
+					headers: requestHeaders,
+				}
+			);
 
             const request = GM_xmlhttpRequest({
                 method: init.method || 'GET',
@@ -587,10 +616,41 @@ async function downloadM3u8AsMP4(
         );
     }
 
-    const videoTrack = videoTracks[0];
+	const videoTrack = videoTracks[0];
 
-    const width = await videoTrack.getDisplayWidth();
-    const height = await videoTrack.getDisplayHeight();
+	const width = await videoTrack.getDisplayWidth();
+	const height = await videoTrack.getDisplayHeight();
+	const averageBitrate =
+		await videoTrack.getAverageBitrate();
+		
+	const duration =
+		fanslyDuration ?? await videoTrack.getDurationFromMetadata();
+
+	const estimatedBytes =
+		averageBitrate && Number.isFinite(duration)
+			? (averageBitrate * duration) / 8
+			: null;
+
+	console.log(
+		'[MediaBunny] Estimated output size:',
+		estimatedBytes !== null
+			? `${(estimatedBytes / 1024 / 1024).toFixed(2)} MiB`
+			: 'unknown'
+	);
+
+	console.log(
+		'[MediaBunny] Average bitrate:',
+		averageBitrate
+			? `${(averageBitrate / 1000).toFixed(0)} kbps`
+			: 'unknown'
+	);
+
+	console.log(
+		'[MediaBunny] Duration:',
+		duration !== null
+			? `${duration.toFixed(3)} seconds`
+			: 'unknown'
+	);
 
     /*
      * Select the audio track paired with the chosen video variant.
@@ -612,65 +672,91 @@ async function downloadM3u8AsMP4(
         );
     }
 
-    /*
-     * Use the File System Access API for high-resolution video so that
-     * the MP4 does not need to exist entirely in browser memory.
-     *
-     * We intentionally do not calculate duration here. Computing exact
-     * duration can require scanning the underlying HLS media and adds
-     * unnecessary work before conversion begins.
-     */
-    const shouldPreferFileTarget =
-        typeof window.showSaveFilePicker === 'function' &&
-        height >= 1080;
 
-    /*
-     * PERFORMANCE EXPERIMENT:
-     *
-     * Use MediaBunny StreamTarget backed by an Origin Private File
-     * System (OPFS) file.
-     *
-     * This intentionally avoids showSaveFilePicker() so that we can
-     * test StreamTarget independently of the browser's user-visible
-     * file picker.
-     *
-     * This is experimental and is NOT the final download destination.
-     */
 	let target;
 	let fileHandle = null;
 	let writable = null;
-	let usingStreamTarget = false;
 
-	if (!navigator.storage?.getDirectory) {
-		throw new Error(
-			'OPFS is not available in this browser.'
+	const useBufferTarget =
+		estimatedBytes !== null &&
+		estimatedBytes < BUFFER_TARGET_MAX_BYTES;
+
+	console.log(
+		'[MediaBunny] Average bitrate:',
+		averageBitrate
+			? `${(averageBitrate / 1000).toFixed(0)} kbps`
+			: 'unknown'
+	);
+
+	console.log(
+		'[MediaBunny] Duration:',
+		Number.isFinite(duration)
+			? `${duration.toFixed(3)} seconds`
+			: 'unknown'
+	);
+
+	console.log(
+		'[MediaBunny] Estimated media size:',
+		estimatedBytes !== null
+			? `${(estimatedBytes / 1024 / 1024).toFixed(2)} MiB`
+			: 'unknown'
+	);
+	
+	console.log(
+    '[MediaBunny] Target decision:',
+    {
+        estimatedBytes,
+        estimatedMiB:
+            estimatedBytes !== null
+                ? estimatedBytes / 1024 / 1024
+                : null,
+        thresholdMiB:
+            BUFFER_TARGET_MAX_BYTES / 1024 / 1024,
+        target: useBufferTarget
+            ? 'BufferTarget'
+            : 'StreamTarget',
+    }
+);
+
+	if (useBufferTarget) {
+		target = new BufferTarget();
+
+		console.log(
+			'[MediaBunny] Using in-memory BufferTarget.'
+		);
+
+	} else {
+		if (!navigator.storage?.getDirectory) {
+			throw new Error(
+				'OPFS is not available in this browser.'
+			);
+		}
+
+		const opfsRoot =
+			await navigator.storage.getDirectory();
+
+		const opfsFilename =
+			`fansly-mediabunny-${Date.now()}.mp4`;
+
+		fileHandle = await opfsRoot.getFileHandle(
+			opfsFilename,
+			{
+				create: true,
+			}
+		);
+
+		writable = await fileHandle.createWritable();
+
+		target = new StreamTarget(writable, {
+			chunked: true,
+			chunkSize: 16 * 1024 * 1024,
+		});
+
+		console.log(
+			`[MediaBunny] Using OPFS StreamTarget: ${opfsFilename}`
 		);
 	}
 
-	const opfsRoot = await navigator.storage.getDirectory();
-
-	const opfsFilename =
-		`fansly-mediabunny-${Date.now()}-${filename}.mp4`;
-
-	fileHandle = await opfsRoot.getFileHandle(
-		opfsFilename,
-		{
-			create: true,
-		}
-	);
-
-	writable = await fileHandle.createWritable();
-
-	target = new StreamTarget(writable, {
-		chunked: true,
-		chunkSize: 16 * 1024 * 1024,
-	});
-
-	usingStreamTarget = true;
-
-	console.log(
-		`[MediaBunny] Using OPFS StreamTarget: ${opfsFilename}`
-	);
 
 
     const output = new Output({
@@ -774,154 +860,83 @@ async function downloadM3u8AsMP4(
 				`(${(conversionSeconds / 60).toFixed(2)} minutes)`
 			);
 
+			if (useBufferTarget) {
+				/*
+				 * BufferTarget contains the completed MP4.
+				 */
+				const buffer = target.buffer;
 
+				if (!buffer) {
+					throw new Error(
+						'MediaBunny completed conversion but produced ' +
+						'no output buffer.'
+					);
+				}
 
-        /*
-         * StreamTarget has already written the MP4 to disk.
-         */
-        if (usingStreamTarget) {
-			writable = null;
+				/*
+				 * The File's lastModified value is deliberately based on
+				 * Fansly's createdAt timestamp rather than Date.now().
+				 */
+				const file = new File(
+					[buffer],
+					`${filename}.mp4`,
+					{
+						type: 'video/mp4',
+						lastModified: createdAt * 1000,
+					}
+				);
 
-			const file = await fileHandle.getFile();
+				const blobUrl = URL.createObjectURL(file);
 
-            console.log(
-                `[MediaBunny] Finished OPFS streaming ${filename}.mp4`
-            );
+				const link = document.createElement('a');
 
-            console.log(
-                `[MediaBunny] OPFS output size: ` +
-                `${(file.size / 1024 / 1024).toFixed(2)} MiB`
-            );
+				link.href = blobUrl;
+				link.download = `${filename}.mp4`;
+				link.style.display = 'none';
 
-            console.log(
-                `[MediaBunny] OPFS output type: ${file.type}`
-            );
+				document.body.appendChild(link);
+				link.click();
+				link.remove();
 
-            /*
-             * Temporary test only:
-             *
-             * Download the completed OPFS file so we can verify that
-             * the resulting MP4 is valid.
-             *
-             * This creates a Blob URL only AFTER conversion has
-             * completed, rather than keeping the entire output in
-             * MediaBunny's BufferTarget.
-             */
-            const blobUrl = URL.createObjectURL(file);
+				setTimeout(() => {
+					URL.revokeObjectURL(blobUrl);
+				}, 60_000);
 
-            const link = document.createElement('a');
+				console.log(
+					`[MediaBunny] Finished ${filename}.mp4 ` +
+					`(${(buffer.byteLength / 1024 / 1024).toFixed(2)} MiB)`
+				);
 
-            link.href = blobUrl;
-            link.download = `${filename}.mp4`;
-            link.style.display = 'none';
+			} else {
+				/*
+				 * StreamTarget has written the completed MP4 to OPFS.
+				 */
 
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
+				const opfsFile = await fileHandle.getFile();
 
-            setTimeout(() => {
-                URL.revokeObjectURL(blobUrl);
-            }, 60_000);
+				console.log(
+					`[MediaBunny] Finished ${filename}.mp4 ` +
+					`(${(opfsFile.size / 1024 / 1024).toFixed(2)} MiB)`
+				);
 
-            /*
-             * Remove the temporary OPFS file after giving the browser
-             * time to initiate the download.
-             */
-            setTimeout(async () => {
-                try {
-                    await opfsRoot.removeEntry(opfsFilename);
+				const blobUrl = URL.createObjectURL(opfsFile);
 
-                    console.log(
-                        `[MediaBunny] Removed temporary OPFS file: ` +
-                        `${opfsFilename}`
-                    );
-                } catch (error) {
-                    console.warn(
-                        '[MediaBunny] Could not remove temporary OPFS file.',
-                        error
-                    );
-                }
-            }, 60_000);
+				const link = document.createElement('a');
 
-            return;
-        }
+				link.href = blobUrl;
+				link.download = `${filename}.mp4`;
+				link.style.display = 'none';
 
+				document.body.appendChild(link);
+				link.click();
+				link.remove();
 
-        /*
-         * BufferTarget contains the completed MP4.
-         */
-        const buffer = target.buffer;
+				setTimeout(() => {
+					URL.revokeObjectURL(blobUrl);
+				}, 60_000);
+			}
 
-        if (!buffer) {
-            throw new Error(
-                'MediaBunny completed conversion but produced ' +
-                'no output buffer.'
-            );
-        }
-
-        /*
-         * IMPORTANT:
-         *
-         * The File's lastModified value is deliberately based on
-         * Fansly's createdAt timestamp rather than Date.now().
-         *
-         * createdAt is Unix seconds, while File.lastModified uses
-         * Unix milliseconds.
-         */
-        const file = new File(
-            [buffer],
-            `${filename}.mp4`,
-            {
-                type: 'video/mp4',
-                lastModified: createdAt * 1000,
-            }
-        );
-
-        const blobUrl = URL.createObjectURL(file);
-
-        const link = document.createElement('a');
-
-        link.href = blobUrl;
-        link.download = `${filename}.mp4`;
-        link.style.display = 'none';
-
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-
-        /*
-         * Give the browser plenty of time to begin the download before
-         * releasing the object URL.
-         */
-        setTimeout(() => {
-            URL.revokeObjectURL(blobUrl);
-        }, 60_000);
-
-        console.log(
-            `[MediaBunny] Finished ${filename}.mp4 ` +
-            `(${(buffer.byteLength / 1024 / 1024).toFixed(2)} MiB)`
-        );
-
-        try {
-            input.dispose();
-        } catch {
-            // Ignore disposal errors.
-        }
-
-    } catch (error) {
-        /*
-         * If StreamTarget was being used, abort the underlying file
-         * instead of leaving a partially-written MP4 behind.
-         */
-        if (writable) {
-            try {
-                await writable.abort();
-            } catch {
-                // Ignore cleanup errors.
-            }
-
-            writable = null;
-        }
+		} catch (error) {
 
         /*
          * Dispose the input so UrlSource can stop outstanding requests.
@@ -935,7 +950,6 @@ async function downloadM3u8AsMP4(
         throw error;
     }
 }
-
 
 /**
  * Returns true if the media object has a resolvable download URL,
@@ -958,6 +972,77 @@ function mediaIsAccessible(media)
 
     return false;
 }
+
+/**
+ * Global MediaBunny download queue.
+ *
+ * Only one MediaBunny/HLS download is allowed to run at a time.
+ * Jobs are processed FIFO.
+ */
+const mediaDownloadQueue = (() => {
+    const queue = [];
+    let running = false;
+
+    async function processNext() {
+        if (running || queue.length === 0) {
+            return;
+        }
+
+        running = true;
+
+        const job = queue.shift();
+
+        console.log(
+            `[MediaBunny Queue] Starting ${job.filename} ` +
+            `(${queue.length} remaining)`
+        );
+
+        try {
+            await job.run();
+
+            console.log(
+                `[MediaBunny Queue] Completed ${job.filename} ` +
+                `(${queue.length} remaining)`
+            );
+
+            job.resolve();
+        } catch (error) {
+            console.error(
+                `[MediaBunny Queue] Failed ${job.filename}:`,
+                error
+            );
+
+            job.reject(error);
+        } finally {
+            running = false;
+
+            // Start the next queued job, if any.
+            processNext();
+        }
+    }
+
+    function add(filename, run) {
+        return new Promise((resolve, reject) => {
+            queue.push({
+                filename,
+                run,
+                resolve,
+                reject,
+            });
+
+            console.log(
+                `[MediaBunny Queue] Queued ${filename} ` +
+                `(${queue.length} total waiting)`
+            );
+
+            processNext();
+        });
+    }
+
+    return {
+        add,
+    };
+})();
 
 let cmds = [];
 
@@ -1106,11 +1191,15 @@ function extractMediaAndPreview(input, accountMedia, createdAt, media, metaType)
 			 * media items can begin downloading without blocking the
 			 * iteration.
 			 */
-			downloadM3u8AsMP4(
-				m3u8Info.url,
-				m3u8Info.cookies,
-				filenameNoExt,
-				createdAt
+			mediaDownloadQueue.add(
+				finalFilename,
+				() => downloadM3u8AsMP4(
+					m3u8Info.url,
+					m3u8Info.cookies,
+					filenameNoExt,
+					createdAt,
+					m3u8Info.duration
+				)
 			).catch(error => {
 				console.error(
 					`[MediaBunny] Failed to download ${finalFilename}:`,
