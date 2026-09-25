@@ -51,6 +51,8 @@ const MEDIA_BUNNY_URL =
     'https://cdn.jsdelivr.net/npm/mediabunny@1.58.0/+esm';
 
 const mediaBunnyPromise = import(MEDIA_BUNNY_URL);
+
+// Files below 100 MiB use BufferTarget; 100 MiB and above use StreamTarget.
 const BUFFER_TARGET_MAX_BYTES = 100 * 1024 * 1024;
 
 let m3u8MenuCommandId = null;
@@ -172,24 +174,27 @@ let fileIncrements = {};
  * Extracts the highest-quality M3U8 URL and raw CloudFront cookies from a media object.
  * Returns null if the media has no M3U8 playlist variant.
  *
+ * For Fansly HLS, the audio is normally muxed into the media playlist's
+ * MPEG-TS segments. The master playlist may nevertheless advertise
+ * separate AUDIO renditions which are invalid/unusable.
+ *
  * @param {Object} media
- * @returns {{ url: String, cookies: Object }|null}
+ * @returns {{ url: String, cookies: Object, duration: Number|null }|null}
  */
 function getM3u8Info(media)
 {
     const { variants } = media;
-    // Type 302 = HLS (application/vnd.apple.mpegurl)
-    const playlist = variants.find(file => file.type === 302);
 
-    if (!playlist || playlist.locations.length === 0) {
+    // Type 302 = HLS (application/vnd.apple.mpegurl)
+    const playlist = variants?.find(file => file.type === 302);
+
+    if (!playlist || !playlist.locations || playlist.locations.length === 0) {
         return null;
     }
 
     const location = playlist.locations[0];
-    // location.location is the master playlist URL; downloadM3u8AsMP4 will
-    // resolve the highest-quality variant stream from it at download time.
-	
-	let metadata = null;
+
+    let metadata = null;
 
     try {
         metadata = playlist.metadata
@@ -202,8 +207,8 @@ function getM3u8Info(media)
             error
         );
     }
-	
-	return {
+
+    return {
         url: location.location,
         cookies: location.metadata,
         duration: metadata?.duration ?? null,
@@ -276,6 +281,131 @@ async function gmFetch(url, headers = {}, responseType = 'text')
 }
 
 /**
+ * Fetch the HLS master playlist and resolve the highest-resolution
+ * video media playlist.
+ *
+ * Fansly's master playlists can advertise external AUDIO renditions
+ * even though the actual media playlist is already multiplexed:
+ *
+ *   video + AAC audio -> media-N/stream.m3u8
+ *
+ * We deliberately bypass the master-level AUDIO relationship and give
+ * MediaBunny a media playlist URL instead.
+ *
+ * @param {String} masterUrl
+ * @param {Object} cookies
+ * @returns {Promise<String>}
+ */
+async function resolveMuxedMediaPlaylist(masterUrl, cookies)
+{
+    const cookieHeader = Object.entries(cookies || {})
+        .map(([key, value]) => `CloudFront-${key}=${value}`)
+        .join('; ');
+
+    const response = await gmFetch(
+        masterUrl,
+        {
+            'Origin': 'https://fansly.com',
+            'Referer': 'https://fansly.com/',
+            'Cookie': cookieHeader,
+        },
+        'text'
+    );
+
+    if (response.status < 200 || response.status >= 300) {
+        throw new Error(
+            `Failed to fetch HLS master playlist: HTTP ${response.status}`
+        );
+    }
+
+    const text = response.responseText;
+
+    const lines = text
+        .split(/\r?\n/)
+        .map(line => line.trim());
+
+    const variants = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        if (!line.startsWith('#EXT-X-STREAM-INF:')) {
+            continue;
+        }
+
+        const attributes = line.slice('#EXT-X-STREAM-INF:'.length);
+
+        const resolutionMatch =
+            attributes.match(/(?:^|,)RESOLUTION=(\d+)x(\d+)/);
+
+        const bandwidthMatch =
+            attributes.match(/(?:^|,)AVERAGE-BANDWIDTH=(\d+)/);
+
+        const bandwidthFallbackMatch =
+            attributes.match(/(?:^|,)BANDWIDTH=(\d+)/);
+
+        let playlistUrl = null;
+
+        for (let j = i + 1; j < lines.length; j++) {
+            if (!lines[j]) {
+                continue;
+            }
+
+            if (!lines[j].startsWith('#')) {
+                playlistUrl = new URL(lines[j], masterUrl).href;
+                break;
+            }
+        }
+
+        if (!playlistUrl) {
+            continue;
+        }
+
+        variants.push({
+            url: playlistUrl,
+            width: resolutionMatch
+                ? parseInt(resolutionMatch[1], 10)
+                : 0,
+            height: resolutionMatch
+                ? parseInt(resolutionMatch[2], 10)
+                : 0,
+            bandwidth: bandwidthMatch
+                ? parseInt(bandwidthMatch[1], 10)
+                : bandwidthFallbackMatch
+                    ? parseInt(bandwidthFallbackMatch[1], 10)
+                    : 0,
+        });
+    }
+
+    if (variants.length === 0) {
+        throw new Error(
+            'No HLS media playlists found in master playlist.'
+        );
+    }
+
+    variants.sort((a, b) => {
+        if (b.height !== a.height) {
+            return b.height - a.height;
+        }
+
+        return b.bandwidth - a.bandwidth;
+    });
+
+    const selected = variants[0];
+
+    console.log(
+        '[MediaBunny] Resolved muxed HLS media playlist:',
+        selected
+    );
+
+    return {
+        url: selected.url,
+        averageBandwidth: selected.bandwidth || null,
+    };
+
+}
+
+/**
  * Download an authenticated Fansly HLS stream as MP4 using MediaBunny.
  *
  * MediaBunny handles:
@@ -344,7 +474,7 @@ async function downloadM3u8AsMP4(
             const value = line.slice(separator + 1).trim();
 
             if (name) {
-                headers.append(name, value);
+                headers.set(name, value);
             }
         }
 
@@ -394,17 +524,6 @@ async function downloadM3u8AsMP4(
             input.headers.forEach((value, key) => {
                 requestHeaders[key] = value;
             });
-        }
-
-        /*
-         * MediaBunny can issue Range requests. Preserve that header.
-         */
-        if (init.headers instanceof Headers) {
-            const range = init.headers.get('Range');
-
-            if (range) {
-                requestHeaders.Range = range;
-            }
         }
 
         /*
@@ -563,18 +682,41 @@ async function downloadM3u8AsMP4(
     }
 
     console.log(
-        `[MediaBunny] Loading HLS playlist: ${m3u8Url}`
+        `[MediaBunny] Loading HLS master playlist: ${m3u8Url}`
     );
 
     /*
-     * UrlSource supports custom fetchFn. This is the key piece that
-     * allows MediaBunny to work with the authenticated Fansly CDN.
+     * Fansly's master playlist can advertise external AUDIO renditions
+     * which are invalid, while the selected media playlist itself
+     * contains multiplexed H.264 + AAC MPEG-TS segments.
      *
-     * Keep parallelism relatively low because Fansly/CDN rate limiting
-     * is preferable to launching a large number of simultaneous
-     * segment requests.
+     * Resolve the video variant ourselves and give MediaBunny the
+     * media playlist directly. This prevents the HLS layer from
+     * selecting the invalid external audio playlists.
      */
-    const source = new UrlSource(m3u8Url, {
+    const resolvedPlaylist = await resolveMuxedMediaPlaylist(
+        m3u8Url,
+        cookies
+    );
+
+    const mediaPlaylistUrl = resolvedPlaylist.url;
+    const masterAverageBandwidth =
+        resolvedPlaylist.averageBandwidth;
+
+    console.log(
+        `[MediaBunny] Using muxed media playlist: ${mediaPlaylistUrl}`
+    );
+
+    console.log(
+        '[MediaBunny] Master playlist average bandwidth:',
+        masterAverageBandwidth
+            ? `${(masterAverageBandwidth / 1000).toFixed(0)} kbps`
+            : 'unknown'
+    );
+
+    const source = new UrlSource(mediaPlaylistUrl, {
+
+
         fetchFn: authenticatedFetch,
 
         maxCacheSize: 8 * 1024 * 1024,
@@ -604,24 +746,28 @@ async function downloadM3u8AsMP4(
      * MediaBunny flattens HLS variants into tracks, so we don't have
      * to manually parse EXT-X-STREAM-INF ourselves.
      */
-    const videoTracks = await input.getVideoTracks({
-        sortBy: async track => {
-            return -(await track.getDisplayHeight());
-        },
-    });
+	const videoTracks = await input.getVideoTracks({
+		sortBy: async track => {
+			return -(await track.getDisplayHeight());
+		},
+	});
 
-    if (!videoTracks.length) {
-        throw new Error(
-            'MediaBunny found no video tracks in the HLS playlist.'
-        );
-    }
+	if (!videoTracks.length) {
+		throw new Error(
+			'MediaBunny found no video tracks in the HLS playlist.'
+		);
+	}
 
 	const videoTrack = videoTracks[0];
 
+
 	const width = await videoTrack.getDisplayWidth();
+
 	const height = await videoTrack.getDisplayHeight();
-	const averageBitrate =
-		await videoTrack.getAverageBitrate();
+    const averageBitrate =
+        masterAverageBandwidth ??
+        await videoTrack.getAverageBitrate();
+
 		
 	const duration =
 		fanslyDuration ?? await videoTrack.getDurationFromMetadata();
@@ -652,48 +798,14 @@ async function downloadM3u8AsMP4(
 			: 'unknown'
 	);
 
-    /*
-     * Select the audio track paired with the chosen video variant.
-     */
-    const audioTrack =
-        await videoTrack.getPrimaryPairableAudioTrack();
+	console.log(
+		`[MediaBunny] Selected HLS video: ${width}x${height}`
+	);
 
-    console.log(
-        `[MediaBunny] Selected HLS video: ${width}x${height}`
-    );
-
-    if (audioTrack) {
-        console.log(
-            '[MediaBunny] Found matching audio track.'
-        );
-    } else {
-        console.warn(
-            '[MediaBunny] No matching audio track found.'
-        );
-    }
-
-
-	let target;
-	let fileHandle = null;
-	let writable = null;
 
 	const useBufferTarget =
 		estimatedBytes !== null &&
 		estimatedBytes < BUFFER_TARGET_MAX_BYTES;
-
-	console.log(
-		'[MediaBunny] Average bitrate:',
-		averageBitrate
-			? `${(averageBitrate / 1000).toFixed(0)} kbps`
-			: 'unknown'
-	);
-
-	console.log(
-		'[MediaBunny] Duration:',
-		Number.isFinite(duration)
-			? `${duration.toFixed(3)} seconds`
-			: 'unknown'
-	);
 
 	console.log(
 		'[MediaBunny] Estimated media size:',
@@ -703,20 +815,23 @@ async function downloadM3u8AsMP4(
 	);
 	
 	console.log(
-    '[MediaBunny] Target decision:',
-    {
-        estimatedBytes,
-        estimatedMiB:
-            estimatedBytes !== null
-                ? estimatedBytes / 1024 / 1024
-                : null,
-        thresholdMiB:
-            BUFFER_TARGET_MAX_BYTES / 1024 / 1024,
-        target: useBufferTarget
-            ? 'BufferTarget'
-            : 'StreamTarget',
-    }
-);
+		'[MediaBunny] Target decision:',
+		{
+			estimatedBytes,
+			estimatedMiB:
+				estimatedBytes !== null
+					? estimatedBytes / 1024 / 1024
+					: null,
+			thresholdMiB:
+				BUFFER_TARGET_MAX_BYTES / 1024 / 1024,
+			target: useBufferTarget
+				? 'BufferTarget'
+				: 'StreamTarget',
+		}
+	);
+
+	let target;
+	let fileHandle = null;
 
 	if (useBufferTarget) {
 		target = new BufferTarget();
@@ -728,7 +843,7 @@ async function downloadM3u8AsMP4(
 	} else {
 		if (!navigator.storage?.getDirectory) {
 			throw new Error(
-				'OPFS is not available in this browser.'
+				'OPFS is not available in this browser; cannot use StreamTarget for this file.'
 			);
 		}
 
@@ -745,7 +860,7 @@ async function downloadM3u8AsMP4(
 			}
 		);
 
-		writable = await fileHandle.createWritable();
+		const writable = await fileHandle.createWritable();
 
 		target = new StreamTarget(writable, {
 			chunked: true,
@@ -764,21 +879,27 @@ async function downloadM3u8AsMP4(
         target,
     });
 
-    /*
-     * HLS inputs default to their primary tracks, but explicitly
-     * selecting the desired track set here makes the intent clear.
-     *
-     * We use the selected video track and its matching audio track.
-     */
+	/*
+	 * Select only the desired video variant.
+	 *
+	 * We deliberately do not select or filter audio tracks here.
+	 * Fansly's HLS video variants contain multiplexed video+audio
+	 * MPEG-TS segments, so the audio track exposed from the selected
+	 * variant should be retained by MediaBunny as-is.
+	 */
     const conversion = await Conversion.init({
         input,
         output,
 
         /*
-         * This is important: don't transcode unless MediaBunny needs
-         * to. For compatible HLS codecs this can remain a fast
-         * transmux/container conversion.
+         * The media playlist is now a single muxed HLS variant.
+         *
+         * Do not explicitly discard audio here. MediaBunny should
+         * discover the AAC stream contained inside the MPEG-TS
+         * segments and copy it into the MP4.
          */
+        tracks: 'primary',
+
         copy: {
             mode: 'preferred',
         },
@@ -792,17 +913,19 @@ async function downloadM3u8AsMP4(
 
             return {};
         },
-
-        audio: async track => {
-            if (!audioTrack || track !== audioTrack) {
-                return {
-                    discard: true,
-                };
-            }
-
-            return {};
-        },
     });
+
+
+	console.log(
+		'[MediaBunny] Conversion utilized tracks:',
+		conversion.utilizedTracks
+	);
+
+	console.log(
+		'[MediaBunny] Conversion discarded tracks:',
+		conversion.discardedTracks
+	);
+
 
     if (!conversion.isValid) {
         const discarded = conversion.discardedTracks
@@ -934,21 +1057,19 @@ async function downloadM3u8AsMP4(
 				setTimeout(() => {
 					URL.revokeObjectURL(blobUrl);
 				}, 60_000);
+				
 			}
-
-		} catch (error) {
 
         /*
          * Dispose the input so UrlSource can stop outstanding requests.
          */
-        try {
-            input.dispose();
-        } catch {
-            // Ignore disposal errors.
-        }
-
-        throw error;
-    }
+        } finally {
+			try {
+				input.dispose();
+			} catch {
+				// Ignore disposal errors.
+			}
+	}
 }
 
 /**
