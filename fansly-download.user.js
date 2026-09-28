@@ -768,7 +768,7 @@ async function downloadM3u8AsMP4(
         masterAverageBandwidth ??
         await videoTrack.getAverageBitrate();
 
-
+		
 	const duration =
 		fanslyDuration ?? await videoTrack.getDurationFromMetadata();
 
@@ -813,7 +813,7 @@ async function downloadM3u8AsMP4(
 			? `${(estimatedBytes / 1024 / 1024).toFixed(2)} MiB`
 			: 'unknown'
 	);
-
+	
 	console.log(
 		'[MediaBunny] Target decision:',
 		{
@@ -879,6 +879,8 @@ async function downloadM3u8AsMP4(
         target,
     });
 
+	output._muxer.creationTime = 0;
+	
 	/*
 	 * Select only the desired video variant.
 	 *
@@ -913,6 +915,7 @@ async function downloadM3u8AsMP4(
 
             return {};
         },
+		tags: {},
     });
 
 
@@ -1057,7 +1060,7 @@ async function downloadM3u8AsMP4(
 				setTimeout(() => {
 					URL.revokeObjectURL(blobUrl);
 				}, 60_000);
-
+				
 			}
 
         /*
