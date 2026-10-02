@@ -56,6 +56,21 @@ const mediaBunnyPromise = import(MEDIA_BUNNY_URL);
 const BUFFER_TARGET_MAX_BYTES = 100 * 1024 * 1024;
 
 let m3u8MenuCommandId = null;
+
+const DEBUG = false;
+
+function debugLog(...args) {
+    if (DEBUG) {
+        console.log(...args);
+    }
+}
+
+function debugWarn(...args) {
+    if (DEBUG) {
+        console.warn(...args);
+    }
+}
+
 function registerMenuCommands()
 {
     if (m3u8MenuCommandId !== null) {
@@ -102,19 +117,6 @@ function formatTimestamp(timestamp)
 {
     const date = new Date(timestamp * 1000);
     return date.toISOString().split('T')[0];
-}
-
-function getAngularAttribute(element)
-{
-    const attributes = Array.from(element.attributes);
-    const relevantAttribute = attributes.find(x => x.name.includes('_ngcontent'));
-
-    if (!relevantAttribute) {
-        console.error('Has no relevant attributes', element, attributes);
-        return 'unable-to-find-it';
-    }
-
-    return relevantAttribute.name;
 }
 
 /**
@@ -201,7 +203,7 @@ function getM3u8Info(media)
             ? JSON.parse(playlist.metadata)
             : null;
     } catch (error) {
-        console.warn(
+        debugWarn(
             '[MediaBunny] Could not parse HLS metadata:',
             playlist.metadata,
             error
@@ -215,7 +217,7 @@ function getM3u8Info(media)
     };
 }
 
-function getVideoDownloadCommand(media, filename, asCurl)
+function getVideoDownloadCommand(media, filename)
 {
     const info = getM3u8Info(media);
     if (!info) {
@@ -225,10 +227,11 @@ function getVideoDownloadCommand(media, filename, asCurl)
     const { url, cookies, duration } = info;
     const cookieHeader = Object.entries(cookies).map(([k, v]) => `CloudFront-${k}=${v}`).join('; ');
 
-    if (asCurl) {
+/* 
+ if (asCurl) {
         return `curl -L -o "${filename}" -H "Origin: https://fansly.com" -H "Referer: https://fansly.com/" -H "Cookie: ${cookieHeader}" "${url}"`;
     }
-
+*/
     return `yt-dlp -o "${filename}" --add-header "Origin:https://fansly.com" --add-header "Referer:https://fansly.com/" --add-header "Cookie:${cookieHeader}" "${url}"`;
 }
 
@@ -274,27 +277,24 @@ async function gmFetch(url, headers = {}, responseType = 'text')
         // Parse Retry-After header from raw response header string
         const retryAfterMatch = response.responseHeaders?.match(/retry-after:\s*(\d+)/i);
         const waitMs = retryAfterMatch ? parseInt(retryAfterMatch[1], 10) * 1000 : delay;
-        console.warn(`[gmFetch] 429 rate limited. Retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+        debugWarn(`[gmFetch] 429 rate limited. Retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
         await sleep(waitMs);
         delay = Math.min(delay * 2, 30000);
     }
 }
 
 /**
- * Fetch the HLS master playlist and resolve the highest-resolution
- * video media playlist.
+ * Resolve a Fansly HLS master playlist to the highest-resolution
+ * muxed media playlist.
  *
- * Fansly's master playlists can advertise external AUDIO renditions
- * even though the actual media playlist is already multiplexed:
+ * Fansly may advertise separate AUDIO renditions at the master level
+ * even when the selected media playlist already contains both video
+ * and audio. We therefore select the media playlist directly and let
+ * MediaBunny handle the contained tracks.
  *
- *   video + AAC audio -> media-N/stream.m3u8
- *
- * We deliberately bypass the master-level AUDIO relationship and give
- * MediaBunny a media playlist URL instead.
- *
- * @param {String} masterUrl
- * @param {Object} cookies
- * @returns {Promise<String>}
+ * @param {String} masterUrl HLS master playlist URL.
+ * @param {Object} cookies CloudFront cookie values without the prefix.
+ * @returns {Promise<{url: String, averageBandwidth: Number|null}>}
  */
 async function resolveMuxedMediaPlaylist(masterUrl, cookies)
 {
@@ -393,7 +393,7 @@ async function resolveMuxedMediaPlaylist(masterUrl, cookies)
 
     const selected = variants[0];
 
-    console.log(
+    debugLog(
         '[MediaBunny] Resolved muxed HLS media playlist:',
         selected
     );
@@ -422,13 +422,11 @@ async function resolveMuxedMediaPlaylist(masterUrl, cookies)
  * @param {String} m3u8Url
  * @param {Object} cookies CloudFront metadata without the prefix.
  * @param {String} filename Filename without extension.
- * @param {Number} createdAt Fansly Unix timestamp in seconds.
  */
 async function downloadM3u8AsMP4(
     m3u8Url,
     cookies,
     filename,
-    createdAt,
     fanslyDuration
 ) {
     const {
@@ -552,26 +550,6 @@ async function downloadM3u8AsMP4(
                 resolve(response);
             };
 
-			const requestStart = performance.now();
-
-			console.log(
-				'[MediaBunny HTTP] START',
-				init.method || 'GET',
-				url,
-				init.headers instanceof Headers
-					? `Range=${init.headers.get('Range') || 'none'}`
-					: ''
-			);
-
-			console.log(
-				'[MediaBunny HTTP] REQUEST HEADERS',
-				{
-					url,
-					method: init.method || 'GET',
-					headers: requestHeaders,
-				}
-			);
-
             const request = GM_xmlhttpRequest({
                 method: init.method || 'GET',
                 url,
@@ -579,24 +557,15 @@ async function downloadM3u8AsMP4(
                 responseType: 'arraybuffer',
 
 				onload: response => {
-					const elapsed =
-						(performance.now() - requestStart) / 1000;
-
-					console.log(
-						'[MediaBunny HTTP] DONE',
-						`status=${response.status}`,
-						`time=${elapsed.toFixed(2)}s`,
-						url
-					);
 
 					if (response.status === 429) {
-						console.warn(
+						debugWarn(
 							'[MediaBunny HTTP] 429 RATE LIMITED',
 							url,
 							response.responseHeaders
 						);
 					} else if (response.status >= 400) {
-						console.warn(
+						debugWarn(
 							'[MediaBunny HTTP] HTTP ERROR',
 							response.status,
 							url,
@@ -620,11 +589,6 @@ async function downloadM3u8AsMP4(
                 },
 
 				onerror: () => {
-					console.warn(
-						'[MediaBunny HTTP] NETWORK ERROR',
-						url,
-						`after ${((performance.now() - requestStart) / 1000).toFixed(2)}s`
-					);
 
 					finishReject(
 
@@ -635,10 +599,9 @@ async function downloadM3u8AsMP4(
                 },
 
 				ontimeout: () => {
-					console.warn(
+					debugWarn(
 						'[MediaBunny HTTP] TIMEOUT',
-						url,
-						`after ${((performance.now() - requestStart) / 1000).toFixed(2)}s`
+						url
 					);
                     finishReject(
                         new TypeError(
@@ -681,7 +644,7 @@ async function downloadM3u8AsMP4(
         });
     }
 
-    console.log(
+    debugLog(
         `[MediaBunny] Loading HLS master playlist: ${m3u8Url}`
     );
 
@@ -703,11 +666,11 @@ async function downloadM3u8AsMP4(
     const masterAverageBandwidth =
         resolvedPlaylist.averageBandwidth;
 
-    console.log(
+    debugLog(
         `[MediaBunny] Using muxed media playlist: ${mediaPlaylistUrl}`
     );
 
-    console.log(
+    debugLog(
         '[MediaBunny] Master playlist average bandwidth:',
         masterAverageBandwidth
             ? `${(masterAverageBandwidth / 1000).toFixed(0)} kbps`
@@ -739,18 +702,11 @@ async function downloadM3u8AsMP4(
         formats: HLS_FORMATS,
     });
 
-    /*
-     * Ask MediaBunny to inspect the HLS master playlist and select
-     * the highest-resolution video track.
-     *
-     * MediaBunny flattens HLS variants into tracks, so we don't have
-     * to manually parse EXT-X-STREAM-INF ourselves.
-     */
-	const videoTracks = await input.getVideoTracks({
-		sortBy: async track => {
-			return -(await track.getDisplayHeight());
-		},
-	});
+	/*
+	 * The HLS variant was selected above, so this playlist should contain
+	 * the desired video track. MediaBunny handles the demuxing and conversion.
+	 */
+	const videoTracks = await input.getVideoTracks();
 
 	if (!videoTracks.length) {
 		throw new Error(
@@ -761,9 +717,6 @@ async function downloadM3u8AsMP4(
 	const videoTrack = videoTracks[0];
 
 
-	const width = await videoTrack.getDisplayWidth();
-
-	const height = await videoTrack.getDisplayHeight();
     const averageBitrate =
         masterAverageBandwidth ??
         await videoTrack.getAverageBitrate();
@@ -777,68 +730,17 @@ async function downloadM3u8AsMP4(
 			? (averageBitrate * duration) / 8
 			: null;
 
-	console.log(
-		'[MediaBunny] Estimated output size:',
-		estimatedBytes !== null
-			? `${(estimatedBytes / 1024 / 1024).toFixed(2)} MiB`
-			: 'unknown'
-	);
-
-	console.log(
-		'[MediaBunny] Average bitrate:',
-		averageBitrate
-			? `${(averageBitrate / 1000).toFixed(0)} kbps`
-			: 'unknown'
-	);
-
-	console.log(
-		'[MediaBunny] Duration:',
-		duration !== null
-			? `${duration.toFixed(3)} seconds`
-			: 'unknown'
-	);
-
-	console.log(
-		`[MediaBunny] Selected HLS video: ${width}x${height}`
-	);
-
-
 	const useBufferTarget =
 		estimatedBytes !== null &&
 		estimatedBytes < BUFFER_TARGET_MAX_BYTES;
 
-	console.log(
-		'[MediaBunny] Estimated media size:',
-		estimatedBytes !== null
-			? `${(estimatedBytes / 1024 / 1024).toFixed(2)} MiB`
-			: 'unknown'
-	);
-	
-	console.log(
-		'[MediaBunny] Target decision:',
-		{
-			estimatedBytes,
-			estimatedMiB:
-				estimatedBytes !== null
-					? estimatedBytes / 1024 / 1024
-					: null,
-			thresholdMiB:
-				BUFFER_TARGET_MAX_BYTES / 1024 / 1024,
-			target: useBufferTarget
-				? 'BufferTarget'
-				: 'StreamTarget',
-		}
-	);
-
 	let target;
 	let fileHandle = null;
+	let opfsRoot = null;
+	let opfsFilename = null;
 
 	if (useBufferTarget) {
 		target = new BufferTarget();
-
-		console.log(
-			'[MediaBunny] Using in-memory BufferTarget.'
-		);
 
 	} else {
 		if (!navigator.storage?.getDirectory) {
@@ -847,10 +749,10 @@ async function downloadM3u8AsMP4(
 			);
 		}
 
-		const opfsRoot =
+		opfsRoot =
 			await navigator.storage.getDirectory();
 
-		const opfsFilename =
+		opfsFilename =
 			`fansly-mediabunny-${Date.now()}.mp4`;
 
 		fileHandle = await opfsRoot.getFileHandle(
@@ -867,9 +769,6 @@ async function downloadM3u8AsMP4(
 			chunkSize: 16 * 1024 * 1024,
 		});
 
-		console.log(
-			`[MediaBunny] Using OPFS StreamTarget: ${opfsFilename}`
-		);
 	}
 
 
@@ -882,30 +781,16 @@ async function downloadM3u8AsMP4(
 	output._muxer.creationTime = 0;
 	
 	/*
-	 * Select only the desired video variant.
-	 *
-	 * We deliberately do not select or filter audio tracks here.
-	 * Fansly's HLS video variants contain multiplexed video+audio
-	 * MPEG-TS segments, so the audio track exposed from the selected
-	 * variant should be retained by MediaBunny as-is.
+	 * The selected HLS variant is already muxed, so retain its audio track
+	 * and discard only video tracks that are not the selected variant.
 	 */
     const conversion = await Conversion.init({
         input,
         output,
-
-        /*
-         * The media playlist is now a single muxed HLS variant.
-         *
-         * Do not explicitly discard audio here. MediaBunny should
-         * discover the AAC stream contained inside the MPEG-TS
-         * segments and copy it into the MP4.
-         */
         tracks: 'primary',
-
         copy: {
             mode: 'preferred',
         },
-
         video: async track => {
             if (track !== videoTrack) {
                 return {
@@ -917,18 +802,6 @@ async function downloadM3u8AsMP4(
         },
 		tags: {},
     });
-
-
-	console.log(
-		'[MediaBunny] Conversion utilized tracks:',
-		conversion.utilizedTracks
-	);
-
-	console.log(
-		'[MediaBunny] Conversion discarded tracks:',
-		conversion.discardedTracks
-	);
-
 
     if (!conversion.isValid) {
         const discarded = conversion.discardedTracks
@@ -943,7 +816,7 @@ async function downloadM3u8AsMP4(
         );
     }
 
-		console.log(
+		debugLog(
 			`[MediaBunny] Converting ${filename}.mp4`
 		);
 
@@ -967,24 +840,8 @@ async function downloadM3u8AsMP4(
 			}
 		};
 
-		const conversionStart = performance.now();
-
-		console.log(
-			`[MediaBunny] Starting conversion at ` +
-			`${new Date().toLocaleTimeString()}`
-		);
-
 		try {
 			await conversion.execute();
-
-			const conversionSeconds =
-				(performance.now() - conversionStart) / 1000;
-
-			console.log(
-				`[MediaBunny] Conversion completed in ` +
-				`${conversionSeconds.toFixed(2)} seconds ` +
-				`(${(conversionSeconds / 60).toFixed(2)} minutes)`
-			);
 
 			if (useBufferTarget) {
 				/*
@@ -1000,15 +857,14 @@ async function downloadM3u8AsMP4(
 				}
 
 				/*
-				 * The File's lastModified value is deliberately based on
-				 * Fansly's createdAt timestamp rather than Date.now().
+				 * Keep the downloaded file's filesystem timestamp deterministic.
+				 * The MP4's internal creation metadata is handled separately.
 				 */
 				const file = new File(
 					[buffer],
 					`${filename}.mp4`,
 					{
 						type: 'video/mp4',
-						lastModified: createdAt * 1000,
 					}
 				);
 
@@ -1057,8 +913,9 @@ async function downloadM3u8AsMP4(
 				link.click();
 				link.remove();
 
-				setTimeout(() => {
+				setTimeout(async () => {
 					URL.revokeObjectURL(blobUrl);
+					await cleanupOpfsFile(opfsRoot, opfsFilename);
 				}, 60_000);
 				
 			}
@@ -1321,7 +1178,6 @@ function extractMediaAndPreview(input, accountMedia, createdAt, media, metaType)
 					m3u8Info.url,
 					m3u8Info.cookies,
 					filenameNoExt,
-					createdAt,
 					m3u8Info.duration
 				)
 			).catch(error => {
@@ -1477,7 +1333,7 @@ async function apiFetch(path, method = 'GET', body = null)
 
         const retryAfter = response.headers.get('Retry-After');
         const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : delay;
-        console.warn(`[apiFetch] 429 rate limited. Retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+        debugWarn(`[apiFetch] 429 rate limited. Retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
         await sleep(waitMs);
         delay = Math.min(delay * 2, 30000);
     }
@@ -1503,6 +1359,7 @@ async function getPost(postId, returnValue)
 unsafeWindow.getPost = getPost;
 
 const cachedMessageGroups = {};
+
 async function fetchAllMessageGroups()
 {
     const BATCH_SIZE = 50;
@@ -1523,7 +1380,7 @@ async function fetchAllMessageGroups()
 
         const { response } = apiResponse;
         const batch = response.data ?? [];
-
+	
         allData = [...allData, ...batch];
         allAccounts = [...allAccounts, ...(response.aggregationData?.accounts ?? [])];
         allGroups = [...allGroups, ...(response.aggregationData?.groups ?? [])];
@@ -1535,19 +1392,28 @@ async function fetchAllMessageGroups()
         offset += BATCH_SIZE;
         console.log('Getting message groups with offset', offset);
     }
+	
+	const accountsById = new Map(
+		allAccounts.map(account => [account.id, account])
+	);
 
-    for (const groupMeta of allData)
-    {
-        const { groupId, partnerAccountId } = groupMeta;
-        const accountMeta = allAccounts.find(x => x.id === partnerAccountId) || null;
-        const messageMeta = allGroups.find(x => x.createdBy === partnerAccountId) || null;
+	const groupsByCreator = new Map(
+		allGroups.map(group => [group.createdBy, group])
+	);
 
-        cachedMessageGroups[groupId] = {
-            group: groupMeta,
-            account: accountMeta,
-            messageMeta,
-        };
-    }
+	for (const groupMeta of allData)
+	{
+		const { groupId, partnerAccountId } = groupMeta;
+
+		const accountMeta = accountsById.get(partnerAccountId) || null;
+		const messageMeta = groupsByCreator.get(partnerAccountId) || null;
+
+		cachedMessageGroups[groupId] = {
+			group: groupMeta,
+			account: accountMeta,
+			messageMeta,
+		};
+	}
 
     return { data: allData, aggregationData: { accounts: allAccounts, groups: allGroups } };
 }
@@ -1591,7 +1457,8 @@ const cachedMessages = {};
 const messageSyncSelector = '.fal.fa-arrows-rotate';
 const messageUnreadSelector = '.fas.fa-circle.overlay.top.right.blue-1';
 
-const MESSAGE_PAGE_SIZE = 50;//Let's stick to the default Fansly fetching, to avoid detection a tiny bit more.
+// Match Fansly's default message-page size.
+const MESSAGE_PAGE_SIZE = 50;
 const dedupeById = (arr) => [...new Map(arr.map(x => [x.id, x])).values()];
 
 async function handleMessages(groupId, force)
@@ -1631,7 +1498,7 @@ async function handleMessages(groupId, force)
             hasMore: messages.length >= MESSAGE_PAGE_SIZE,
         };
 
-        console.log('[handleMessages] cachedMessages set:', groupId, cachedMessages[groupId]);
+        debugLog('[handleMessages] cachedMessages set:', groupId, cachedMessages[groupId]);
 
         addDownloadMessageMediaButton();
     } catch (err) {
@@ -1675,7 +1542,6 @@ async function fetchMoreMessages(groupId)
         hasMore,
     };
 
-    console.log(`fetchMoreMessages: fetched ${newMessages.length} more for group ${groupId}. hasMore=${hasMore}`);
     return hasMore;
 }
 
@@ -1751,22 +1617,23 @@ async function getMessageMedia(groupId, messageId)
  */
 function addDownloadMessageMediaButton()
 {
-    const sync = document.querySelector(messageSyncSelector);
-    if (!sync) {
-        console.log('Cannot find sync selector', messageSyncSelector);
-        return;
-    }
+	const sync = document.querySelector(messageSyncSelector);
+	if (!sync) {
+		return;
+	}
 
-    const unread = document.querySelector(messageUnreadSelector);
-    if (!unread) {
-        console.log('Cannot find unread selector', messageUnreadSelector);
-        return;
-    }
+	const unread = document.querySelector(messageUnreadSelector);
+	if (!unread) {
+		return;
+	}
 
-    const parent = sync.parentElement;
+	const parent = sync.parentElement;
+	const parent2 = unread.parentElement?.parentElement;
 
-	const parent2 = unread.parentElement.parentElement;
-
+	if (!parent || !parent2) {
+		return;
+	}
+	
 	const buttons = getDownloadMessageButtons();
 
 	if (!buttons.iconButton) {
@@ -1798,40 +1665,6 @@ function getDownloadMessageButtons()
         iconButton: document.querySelector('#downloadMessageBundles'),
         menuButton: document.querySelector('#downloadMessagesMenuButton'),
     };
-}
-
-/**
- * Begin profile page handling
- *
- * TODO: This is very incomplete as of right now.
- */
-async function fetchProfile(username)
-{
-    const response = await apiFetch(`/account?usernames=${username}`);
-    const json = await response.json();
-
-    if (!json.success || json.response.length < 1) {
-        return;
-    }
-
-    const profile = json.response[0];
-    const neighborButton = document.querySelector('.dm-profile') || document.querySelector('.tip-profile') || document.querySelector('.follow-profile');
-    const relevantAttribute = getAngularAttribute(neighborButton);
-
-    // Don't add another button
-    const downloadButtonId = 'profile-dl';
-    if (document.getElementById(downloadButtonId)) {
-        return;
-    }
-
-    const downloadButton = document.createElement('div');
-    downloadButton.setAttribute(relevantAttribute, '');
-    downloadButton.setAttribute('class', 'dm-profile');
-    downloadButton.setAttribute('id', downloadButtonId);
-    downloadButton.innerHTML = `<i class="${downloadIconClasses}"></i>`;
-    neighborButton.insertAdjacentElement('beforebegin', downloadButton);
-
-    console.log('Profile', profile);
 }
 
 /**
@@ -2016,9 +1849,6 @@ async function openDownloadMessageModal(button) {
 		});
 	}
 
-	console.log('groupId', groupId);
-	console.log('cachedMessages', cachedMessages);
-	console.log('cachedMessages[groupId]', cachedMessages[groupId]);
 	// Populate the select with the initially-fetched messages.
 	if (!cachedMessages[groupId]) {
 		await handleMessages(groupId, true);
@@ -2079,7 +1909,6 @@ async function openDownloadMessageModal(button) {
 
 		const selectedMessageId = selectElem.value;
 
-		console.log('Group ID', groupId, 'Selected Message ID', selectedMessageId);
 		const { bundles, medias } = await getMessageMedia(groupId, selectedMessageId);
 
 		// Disable the button and add spinner
@@ -2107,7 +1936,6 @@ async function openDownloadMessageModal(button) {
 	});
 
 	downloadMessagesButton.addEventListener('click', async function() {
-		console.log('Group ID', groupId);
 		downloadMessages(cachedMessages[groupId].response,groupId);
 	});
 
@@ -2198,6 +2026,7 @@ function scheduleDomHandling()
 
 function initObserver()
 {
+	
 	const observer = new MutationObserver((mutations) => {
 		for (const mutation of mutations) {
 			if (mutation.addedNodes.length > 0) {
@@ -2261,4 +2090,19 @@ function downloadMessages(messages, groupId)
     document.body.removeChild(link);
 
     URL.revokeObjectURL(url);
+}
+
+async function cleanupOpfsFile(opfsRoot, filename) {
+    if (!opfsRoot || !filename) {
+        return;
+    }
+
+    try {
+        await opfsRoot.removeEntry(filename);
+    } catch (error) {
+        debugWarn(
+            `[MediaBunny] Failed to remove temporary OPFS file ${filename}:`,
+            error
+        );
+    }
 }
