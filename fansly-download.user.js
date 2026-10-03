@@ -55,6 +55,8 @@ const mediaBunnyPromise = import(MEDIA_BUNNY_URL);
 // Files below 100 MiB use BufferTarget; 100 MiB and above use StreamTarget.
 const BUFFER_TARGET_MAX_BYTES = 100 * 1024 * 1024;
 
+const IMAGE_DOWNLOAD_CONCURRENCY = 10;
+
 let m3u8MenuCommandId = null;
 let scriptMenuCommandId = null;
 
@@ -295,7 +297,7 @@ async function gmFetch(url, headers = {}, responseType = 'text')
         // Parse Retry-After header from raw response header string
         const retryAfterMatch = response.responseHeaders?.match(/retry-after:\s*(\d+)/i);
         const waitMs = retryAfterMatch ? parseInt(retryAfterMatch[1], 10) * 1000 : delay;
-        debugWarn(`[gmFetch] 429 rate limited. Retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+        console.warn(`[gmFetch] 429 rate limited. Retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
         await sleep(waitMs);
         delay = Math.min(delay * 2, 30000);
     }
@@ -1037,6 +1039,103 @@ const mediaDownloadQueue = (() => {
     };
 })();
 
+/**
+ * Global image download queue.
+ *
+ * Allows multiple image downloads to run simultaneously, but limits
+ * the number of active downloads to avoid overwhelming the browser
+ * or server when downloading large photosets.
+ */
+const imageDownloadQueue = (() => {
+    const queue = [];
+    let running = 0;
+
+    function processNext() {
+        while (
+            running < IMAGE_DOWNLOAD_CONCURRENCY &&
+            queue.length > 0
+        ) {
+            const job = queue.shift();
+            running++;
+
+            console.log(
+                `[Image Queue] Starting ${job.filename} ` +
+                `(${queue.length} remaining, ${running} active)`
+            );
+
+            GM_download({
+                method: 'GET',
+                url: job.url,
+                name: job.filename,
+                saveAs: false,
+
+                onload: () => {
+                    console.log(
+                        `[Image Queue] Completed ${job.filename}`
+                    );
+
+                    running--;
+                    job.resolve();
+                    processNext();
+                },
+
+                onerror: error => {
+                    console.error(
+                        `[Image Queue] Failed ${job.filename}:`,
+                        error
+                    );
+
+                    running--;
+                    job.reject(error);
+                    processNext();
+                },
+
+                onabort: () => {
+                    console.warn(
+                        `[Image Queue] Aborted ${job.filename}`
+                    );
+
+                    running--;
+                    job.reject(new Error('Download aborted'));
+                    processNext();
+                },
+
+                ontimeout: () => {
+                    console.warn(
+                        `[Image Queue] Timed out ${job.filename}`
+                    );
+
+                    running--;
+                    job.reject(new Error('Download timed out'));
+                    processNext();
+                },
+            });
+        }
+    }
+
+    function add(url, filename) {
+        return new Promise((resolve, reject) => {
+            queue.push({
+                url,
+                filename,
+                resolve,
+                reject,
+            });
+
+            console.log(
+                `[Image Queue] Queued ${filename} ` +
+                `(${queue.length} waiting, ${running} active)`
+            );
+
+            processNext();
+        });
+    }
+
+    return {
+        add,
+    };
+})();
+
 let cmds = [];
 
 /**
@@ -1199,12 +1298,23 @@ function extractMediaAndPreview(input, accountMedia, createdAt, media, metaType)
 				);
 			});
 		} else {
-			GM_download({
-				method: 'GET',
-				url: url,
-				name: finalFilename,
-				saveAs: false,
-			});
+			if (mimetype.startsWith('image/')) {
+				imageDownloadQueue
+					.add(url, finalFilename)
+					.catch(error => {
+						console.error(
+							`[Image Queue] Failed ${finalFilename}:`,
+							error
+						);
+					});
+			} else {
+				GM_download({
+					method: 'GET',
+					url: url,
+					name: finalFilename,
+					saveAs: false,
+				});
+			}
 		}
 	} else {
         cmds.push(downloadCmd);
