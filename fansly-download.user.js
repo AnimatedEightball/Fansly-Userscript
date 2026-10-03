@@ -14,7 +14,7 @@
 // @updateURL   https://github.com/AnimatedEightball/Fansly-Userscript/raw/refs/heads/main/fansly-download.user.js
 // @homepageURL https://github.com/AnimatedEightball/Fansly-Userscript/
 // @icon        https://m.leak.fans/ujs/fansly-icon.png
-// @version     0.9.6a
+// @version     0.9.6
 // @author      M&S
 // @description Work in progress userscript for download media of single posts & message media on Fansly.
 // ==/UserScript==
@@ -29,9 +29,9 @@ const downloadIconClasses = 'fal fa-fw fa-file-upload fa-rotate-180 pointer';
  * curl and yt-dlp (for m3u8 files) commands will be put into a .sh script and that will be downloaded instead.
  * Alternative method, since browsers have a tendency to get a bit sluggish when you're downloading 30+ files all at once.
  *
- * For the time being, if you want this to work, you'll have to go on the "Values" tab at the top of this script and set `SCRIPT_DOWNLOAD` to true.
+ * Toggled via the Violentmonkey context menu.
  */
-const scriptDownload = GM_getValue('SCRIPT_DOWNLOAD', false);
+let scriptDownload = GM_getValue('SCRIPT_DOWNLOAD', false);
 
 /**
  * When enabled, HLS playlists are converted to MP4 in-browser via MediaBunny.
@@ -56,6 +56,7 @@ const mediaBunnyPromise = import(MEDIA_BUNNY_URL);
 const BUFFER_TARGET_MAX_BYTES = 100 * 1024 * 1024;
 
 let m3u8MenuCommandId = null;
+let scriptMenuCommandId = null;
 
 const DEBUG = false;
 
@@ -83,6 +84,23 @@ function registerMenuCommands()
             m3u8Download = !m3u8Download;
             console.log(`M3U8 in-browser download set to ${m3u8Download}`);
             GM_setValue('M3U8_DOWNLOAD', m3u8Download);
+            registerMenuCommands();
+        },
+        {
+            autoClose: true,
+        }
+    );
+	
+   if (scriptMenuCommandId !== null) {
+        GM_unregisterMenuCommand(scriptMenuCommandId);
+    }
+
+    scriptMenuCommandId = GM_registerMenuCommand(
+        `Download Scripts for external downloads: ${scriptDownload ? 'ON' : 'OFF'}`,
+        function() {
+            scriptDownload = !scriptDownload;
+            console.log(`Download Scripts for external downloads ${scriptDownload}`);
+            GM_setValue('SCRIPT_DOWNLOAD', scriptDownload);
             registerMenuCommands();
         },
         {
@@ -224,7 +242,7 @@ function getVideoDownloadCommand(media, filename)
         return null;
     }
 
-    const { url, cookies, duration } = info;
+    const { url, cookies} = info;
     const cookieHeader = Object.entries(cookies).map(([k, v]) => `CloudFront-${k}=${v}`).join('; ');
 
 /* 
@@ -392,7 +410,7 @@ async function resolveMuxedMediaPlaylist(masterUrl, cookies)
     });
 
     const selected = variants[0];
-
+	
     debugLog(
         '[MediaBunny] Resolved muxed HLS media playlist:',
         selected
@@ -682,8 +700,6 @@ async function downloadM3u8AsMP4(
 
         fetchFn: authenticatedFetch,
 
-        maxCacheSize: 8 * 1024 * 1024,
-
         parallelism: 6,
 
         getRetryDelay: previousAttempts => {
@@ -791,7 +807,7 @@ async function downloadM3u8AsMP4(
         copy: {
             mode: 'preferred',
         },
-        video: async track => {
+        video: track => {
             if (track !== videoTrack) {
                 return {
                     discard: true,
@@ -856,10 +872,6 @@ async function downloadM3u8AsMP4(
 					);
 				}
 
-				/*
-				 * Keep the downloaded file's filesystem timestamp deterministic.
-				 * The MP4's internal creation metadata is handled separately.
-				 */
 				const file = new File(
 					[buffer],
 					`${filename}.mp4`,
