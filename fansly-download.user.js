@@ -14,7 +14,7 @@
 // @updateURL   https://github.com/AnimatedEightball/Fansly-Userscript/raw/refs/heads/main/fansly-download.user.js
 // @homepageURL https://github.com/AnimatedEightball/Fansly-Userscript/
 // @icon        https://m.leak.fans/ujs/fansly-icon.png
-// @version     0.9.6
+// @version     0.9.7a
 // @author      M&S
 // @description Work in progress userscript for download media of single posts & message media on Fansly.
 // ==/UserScript==
@@ -450,15 +450,18 @@ async function downloadM3u8AsMP4(
     fanslyDuration
 ) {
     const {
-        Input,
-        UrlSource,
-        HLS_FORMATS,
-        Output,
-        Mp4OutputFormat,
-        BufferTarget,
-		StreamTarget,
-        Conversion,
-    } = await mediaBunnyPromise;
+			Input,
+			UrlSource,
+			HLS_FORMATS,
+			BufferSource,
+			ReadableStreamSource,
+			MPEG_TS,
+			Output,
+			Mp4OutputFormat,
+			BufferTarget,
+			StreamTarget,
+			Conversion,
+	} = await mediaBunnyPromise;
 
     const cookieHeader = Object.entries(cookies || {})
         .map(([key, value]) => `CloudFront-${key}=${value}`)
@@ -944,6 +947,1083 @@ async function downloadM3u8AsMP4(
 				// Ignore disposal errors.
 			}
 	}
+}
+
+/**
+ * Live HLS capture helper.
+ *
+ * Initial version:
+ * - Discovers the current live stream through the Fansly API.
+ * - Resolves the master HLS playlist.
+ * - Selects the highest-quality video variant.
+ * - Polls the live variant playlist.
+ * - Reports newly discovered segments.
+ *
+ * No media is downloaded yet.
+ */
+const liveCapture = (() => {
+    let running = false;
+    let timer = null;
+
+    let accountId = null;
+    let streamId = null;
+    let historyId = null;
+
+    let masterUrl = null;
+    let variantUrl = null;
+
+    let lastMediaSequence = null;
+    const seenSegments = new Set();
+	
+	let liveStreamWriter = null;
+	let liveConversionPromise = null;
+	let liveInput = null;
+	
+
+	const pendingSegmentDownloads = new Set();
+	const pendingSegments = new Map();
+
+	let nextSegmentSequence = null;
+	let segmentWriteChain = Promise.resolve();
+	
+	const TEST_CAPTURE_DURATION = 60;
+
+	let captureStarted = false;
+	let capturedDuration = 0;
+	
+    /**
+     * Fetch the current live-stream information for an account.
+     *
+     * @param {String} id Fansly account ID
+     * @returns {Object|null}
+     */
+	async function getStreamInfo(id)
+	{
+		const response = await apiFetch(
+			`/streaming/channel/${id}?ngsw-bypass=true`
+		);
+
+		const data = await response.json();
+
+		console.log(
+			'[LiveCapture] /streaming/channel response:',
+			data
+		);
+
+		if (!data.success || !data.response) {
+			throw new Error(
+				'Fansly returned an invalid live-stream response.'
+			);
+		}
+
+		return data.response;
+	}
+
+    /**
+     * Select the highest-quality video variant from a master playlist.
+     *
+     * @param {String} url Master playlist URL
+     * @returns {String} Variant playlist URL
+     */
+    async function resolveVariant(url)
+    {
+		console.log(
+			'[LiveCapture] Fetching master playlist...'
+		);
+
+		const text = await fetchLivePlaylist(url);
+
+		console.log(
+			'[LiveCapture] Master playlist fetched:',
+			text.length,
+			'bytes'
+		);
+
+		const lines = text
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(Boolean);
+
+        const variants = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            if (!lines[i].startsWith('#EXT-X-STREAM-INF:')) {
+                continue;
+            }
+
+            const attributes = lines[i]
+                .substring('#EXT-X-STREAM-INF:'.length);
+
+            const bandwidthMatch =
+                attributes.match(/(?:^|,)BANDWIDTH=(\d+)/);
+
+            const resolutionMatch =
+                attributes.match(/(?:^|,)RESOLUTION=(\d+)x(\d+)/);
+
+            const bandwidth = bandwidthMatch
+                ? Number(bandwidthMatch[1])
+                : 0;
+
+            const height = resolutionMatch
+                ? Number(resolutionMatch[2])
+                : 0;
+
+            const variantLine = lines[i + 1];
+
+            if (!variantLine || variantLine.startsWith('#')) {
+                continue;
+            }
+
+            variants.push({
+                url: new URL(variantLine, url).href,
+                bandwidth,
+                height,
+            });
+        }
+
+        if (variants.length === 0) {
+            throw new Error(
+                'No video variants were found in the master playlist.'
+            );
+        }
+
+        variants.sort((a, b) => {
+            if (a.height !== b.height) {
+                return b.height - a.height;
+            }
+
+            return b.bandwidth - a.bandwidth;
+        });
+
+        const selected = variants[0];
+
+        console.log(
+            `[LiveCapture] Selected ${selected.height}p ` +
+            `(${selected.bandwidth} bps)`
+        );
+
+        return selected.url;
+    }
+
+    /**
+     * Poll the selected live variant playlist.
+     */
+    async function poll()
+    {
+        if (!running) {
+            return;
+        }
+
+        try {
+            const text = await fetchLivePlaylist(variantUrl);
+
+            const lines = text
+                .split(/\r?\n/)
+                .map(line => line.trim());
+
+            let mediaSequence = null;
+            let currentSegment = null;
+            let segmentCount = 0;
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+
+                if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
+                    mediaSequence = Number(
+                        line.substring('#EXT-X-MEDIA-SEQUENCE:'.length)
+                    );
+                    continue;
+                }
+
+                if (line.startsWith('#EXTINF:')) {
+                    const durationText = line
+                        .substring('#EXTINF:'.length)
+                        .split(',')[0];
+
+                    currentSegment = {
+                        duration: Number(durationText),
+                    };
+
+                    continue;
+                }
+
+                if (
+                    currentSegment &&
+                    line &&
+                    !line.startsWith('#')
+                ) {
+                    currentSegment.url =
+                        new URL(line, variantUrl).href;
+
+                    currentSegment.sequence =
+                        mediaSequence + segmentCount;
+
+                    const key =
+                        String(currentSegment.sequence);
+
+					if (!seenSegments.has(key)) {
+						seenSegments.add(key);
+
+						console.log(
+							`[LiveCapture] New segment ` +
+							`#${currentSegment.sequence} ` +
+							`(${currentSegment.duration}s)`
+						);
+
+						if (captureStarted) {
+							downloadSegment(currentSegment);
+
+							capturedDuration += currentSegment.duration;
+
+							console.log(
+								`[LiveCapture] Capture progress: ` +
+								`${capturedDuration.toFixed(1)} / ` +
+								`${TEST_CAPTURE_DURATION}s`
+							);
+
+							if (capturedDuration >= TEST_CAPTURE_DURATION) {
+								console.log(
+									`[LiveCapture] Reached test capture duration ` +
+									`of ${TEST_CAPTURE_DURATION}s.`
+								);
+
+								stop();
+							}
+						}
+					}
+                    segmentCount++;
+                    currentSegment = null;
+                }
+            }
+
+            if (mediaSequence !== null) {
+                if (lastMediaSequence !== null) {
+                    const difference =
+                        mediaSequence - lastMediaSequence;
+
+                    if (difference > 0) {
+                        console.log(
+                            `[LiveCapture] Playlist advanced ` +
+                            `by ${difference} segment(s): ` +
+                            `${lastMediaSequence} → ${mediaSequence}`
+                        );
+                    }
+                }
+
+                lastMediaSequence = mediaSequence;
+            }
+
+            if (text.includes('#EXT-X-ENDLIST')) {
+                console.log(
+                    '[LiveCapture] Stream playlist ended.'
+                );
+
+                stop();
+                return;
+            }
+
+        } catch (error) {
+            console.error(
+                '[LiveCapture] Playlist polling failed:',
+                error
+            );
+        }
+
+		if (!captureStarted) {
+			captureStarted = true;
+
+			console.log(
+				'[LiveCapture] Initial playlist established. ' +
+				'Beginning live segment capture.'
+			);
+		}
+
+        if (running) {
+            timer = setTimeout(poll, 5000);
+        }
+    }
+	
+	async function finalizeCapture()
+	{
+		if (!capturedSegments.length) {
+			console.warn(
+				'[LiveCapture] No captured segments to finalize.'
+			);
+			return;
+		}
+
+		console.log(
+			`[LiveCapture] Waiting for ` +
+			`${pendingSegmentDownloads.size} pending segment download(s)...`
+		);
+
+		await Promise.allSettled(
+			[...pendingSegmentDownloads]
+		);
+
+		if (!capturedSegments.length) {
+			console.warn(
+				'[LiveCapture] No segments were successfully captured.'
+			);
+			return;
+		}
+
+		capturedSegments.sort(
+			(a, b) => a.sequence - b.sequence
+		);
+
+		console.log(
+			`[LiveCapture] Finalizing ${capturedSegments.length} ` +
+			`MPEG-TS segment(s) with MediaBunny.`
+		);
+
+		const totalBytes = capturedSegments.reduce(
+			(total, segment) =>
+				total + segment.buffer.byteLength,
+			0
+		);
+
+		console.log(
+			`[LiveCapture] Captured size: ` +
+			`${(totalBytes / 1024 / 1024).toFixed(2)} MiB`
+		);
+
+		/*
+		 * Concatenate the MPEG-TS segments into one contiguous
+		 * ArrayBuffer.
+		 */
+		const combined = new Uint8Array(totalBytes);
+
+		let offset = 0;
+
+		for (const segment of capturedSegments) {
+			const bytes = new Uint8Array(segment.buffer);
+
+			combined.set(bytes, offset);
+			offset += bytes.byteLength;
+		}
+
+		const {
+			Input,
+			MPEG_TS,
+			BufferSource,
+			Output,
+			Mp4OutputFormat,
+			BufferTarget,
+			Conversion,
+		} = await mediaBunnyPromise;
+
+		const source = new BufferSource(combined);
+
+		const input = new Input({
+			source,
+			formats: [MPEG_TS],
+		});
+
+		try {
+			const videoTracks =
+				await input.getVideoTracks();
+
+			if (!videoTracks.length) {
+				throw new Error(
+					'MediaBunny found no video tracks in the captured MPEG-TS data.'
+				);
+			}
+
+			const videoTrack = videoTracks[0];
+
+			const duration =
+				await videoTrack.getDurationFromMetadata();
+
+			console.log(
+				`[LiveCapture] MediaBunny detected duration: ` +
+				`${Number.isFinite(duration)
+					? duration.toFixed(2)
+					: 'unknown'}s`
+			);
+
+			const target = new BufferTarget();
+
+			const output = new Output({
+				format: new Mp4OutputFormat(),
+				target,
+			});
+
+			output._muxer.creationTime = 0;
+
+			const conversion = await Conversion.init({
+				input,
+				output,
+
+				tracks: 'primary',
+
+				copy: {
+					mode: 'preferred',
+				},
+
+				video: track => {
+					if (track !== videoTrack) {
+						return {
+							discard: true,
+						};
+					}
+
+					return {};
+				},
+
+				tags: {},
+			});
+
+			if (!conversion.isValid) {
+				const discarded =
+					conversion.discardedTracks
+						.map(item => {
+							return (
+								`${String(item.track)}: ` +
+								`${item.reason}`
+							);
+						})
+						.join('\n');
+
+				throw new Error(
+					`MediaBunny conversion is invalid.\n\n` +
+					`Discarded tracks:\n` +
+					`${discarded || '(none)'}`
+				);
+			}
+
+			conversion.onProgress = progress => {
+				const percent =
+					Math.floor(progress * 100);
+
+				console.log(
+					`[LiveCapture] MediaBunny ${percent}%`
+				);
+			};
+
+			await conversion.execute();
+
+			const buffer = target.buffer;
+
+			if (!buffer) {
+				throw new Error(
+					'MediaBunny completed conversion but produced no output buffer.'
+				);
+			}
+
+			const filename =
+				`fansly-live-test-${Date.now()}.mp4`;
+
+			const file = new File(
+				[buffer],
+				filename,
+				{
+					type: 'video/mp4',
+				}
+			);
+
+			const blobUrl =
+				URL.createObjectURL(file);
+
+			const link =
+				document.createElement('a');
+
+			link.href = blobUrl;
+			link.download = filename;
+			link.style.display = 'none';
+
+			document.body.appendChild(link);
+			link.click();
+			link.remove();
+
+			setTimeout(() => {
+				URL.revokeObjectURL(blobUrl);
+			}, 60_000);
+
+			console.log(
+				`[LiveCapture] MediaBunny produced ` +
+				`${filename} ` +
+				`(${(buffer.byteLength / 1024 / 1024).toFixed(2)} MiB)`
+			);
+
+		} finally {
+			try {
+				input.dispose();
+			} catch {
+				// Ignore disposal errors.
+			}
+		}
+	}
+
+	async function startMediaBunny()
+	{
+		const {
+			Input,
+			ReadableStreamSource,
+			MPEG_TS,
+			Output,
+			Mp4OutputFormat,
+			BufferTarget,
+			Conversion,
+		} = await mediaBunnyPromise;
+
+		const {
+			writable,
+			readable,
+		} = new TransformStream();
+
+		liveStreamWriter = writable.getWriter();
+
+		const source = new ReadableStreamSource(
+			readable,
+			{
+				maxCacheSize: 128 * 1024 * 1024,
+			}
+		);
+
+		liveInput = new Input({
+			source,
+			formats: [MPEG_TS],
+		});
+
+		const target = new BufferTarget();
+
+		const output = new Output({
+			format: new Mp4OutputFormat(),
+			target,
+		});
+
+		output._muxer.creationTime = 0;
+
+		/*
+		 * Start MediaBunny before writing any live segments.
+		 *
+		 * The conversion will wait for enough MPEG-TS data to
+		 * become available from the ReadableStreamSource.
+		 */
+		liveConversionPromise = (async () => {
+			const videoTracks =
+				await liveInput.getVideoTracks();
+
+			if (!videoTracks.length) {
+				throw new Error(
+					'MediaBunny found no video tracks in the live MPEG-TS stream.'
+				);
+			}
+
+			const videoTrack = videoTracks[0];
+
+			console.log(
+				'[LiveCapture] MediaBunny detected live video track.'
+			);
+
+			const conversion =
+				await Conversion.init({
+					input: liveInput,
+					output,
+
+					tracks: 'primary',
+
+					copy: {
+						mode: 'preferred',
+					},
+
+					video: track => {
+						if (track !== videoTrack) {
+							return {
+								discard: true,
+							};
+						}
+
+						return {};
+					},
+
+					tags: {},
+				});
+
+			if (!conversion.isValid) {
+				const discarded =
+					conversion.discardedTracks
+						.map(item => {
+							return (
+								`${String(item.track)}: ` +
+								`${item.reason}`
+							);
+						})
+						.join('\n');
+
+				throw new Error(
+					`MediaBunny conversion is invalid.\n\n` +
+					`Discarded tracks:\n` +
+					`${discarded || '(none)'}`
+				);
+			}
+
+			let lastLoggedPercent = -1;
+
+			conversion.onProgress = progress => {
+				/*
+				 * A live source has no known final duration, so
+				 * progress is not expected to behave like a normal
+				 * finite-file conversion.
+				 *
+				 * Keep this for diagnostic purposes only.
+				 */
+				const percent =
+					Math.floor(progress * 100);
+
+				if (
+					percent >= lastLoggedPercent + 5 &&
+					percent <= 100
+				) {
+					lastLoggedPercent = percent;
+
+					console.log(
+						`[LiveCapture] MediaBunny progress: ${percent}%`
+					);
+				}
+			};
+
+			console.log(
+				'[LiveCapture] MediaBunny conversion started.'
+			);
+
+			await conversion.execute();
+
+			const buffer = target.buffer;
+
+			if (!buffer) {
+				throw new Error(
+					'MediaBunny completed but produced no MP4 output.'
+				);
+			}
+
+			const filename =
+				`fansly-live-${Date.now()}.mp4`;
+
+			const file = new File(
+				[buffer],
+				filename,
+				{
+					type: 'video/mp4',
+				}
+			);
+
+			const blobUrl =
+				URL.createObjectURL(file);
+
+			const link =
+				document.createElement('a');
+
+			link.href = blobUrl;
+			link.download = filename;
+			link.style.display = 'none';
+
+			document.body.appendChild(link);
+			link.click();
+			link.remove();
+
+			setTimeout(() => {
+				URL.revokeObjectURL(blobUrl);
+			}, 60_000);
+
+			console.log(
+				`[LiveCapture] MediaBunny finished ${filename} ` +
+				`(${(buffer.byteLength / 1024 / 1024).toFixed(2)} MiB)`
+			);
+		})();
+
+		/*
+		 * Catching here prevents an unhandled promise rejection.
+		 * stop() will also await this promise.
+		 */
+		liveConversionPromise.catch(error => {
+			console.error(
+				'[LiveCapture] MediaBunny conversion failed:',
+				error
+			);
+		});
+
+		console.log(
+			'[LiveCapture] MediaBunny stream initialized.'
+		);
+	}
+
+	async function queueSegmentForMediaBunny(
+		sequence,
+		buffer
+	) {
+		pendingSegments.set(
+			sequence,
+			new Uint8Array(buffer)
+		);
+
+		/*
+		 * The first successfully downloaded segment establishes
+		 * the starting sequence number for this capture.
+		 */
+		if (nextSegmentSequence === null) {
+			nextSegmentSequence = sequence;
+		}
+
+		/*
+		 * Serialize all writes to MediaBunny.
+		 *
+		 * This is important because multiple GM_xmlhttpRequest()
+		 * calls can complete in a different order than the HLS
+		 * sequence numbers.
+		 */
+		segmentWriteChain =
+			segmentWriteChain.then(async () => {
+				while (
+					pendingSegments.has(nextSegmentSequence)
+				) {
+					const bytes =
+						pendingSegments.get(
+							nextSegmentSequence
+						);
+
+					pendingSegments.delete(
+						nextSegmentSequence
+					);
+
+					console.log(
+						`[LiveCapture] Feeding segment ` +
+						`#${nextSegmentSequence} to MediaBunny ` +
+						`(${bytes.byteLength} bytes)`
+					);
+
+					if (!liveStreamWriter) {
+						console.warn(
+							`[LiveCapture] Ignoring segment #${nextSegmentSequence} because the MediaBunny writer is no longer active.`
+						);
+						return;
+					}
+
+					await liveStreamWriter.write(bytes);
+
+					nextSegmentSequence++;
+				}
+			});
+
+		return segmentWriteChain;
+	}
+
+    /**
+     * Start monitoring a live stream.
+     *
+     * @param {String} id Fansly account ID
+     */
+    async function start(id)
+    {
+        if (running) {
+            console.warn(
+                '[LiveCapture] Already running.'
+            );
+            return;
+        }
+
+        if (!id) {
+            throw new Error(
+                'A Fansly account ID is required.'
+            );
+        }
+		
+		captureStarted = false;
+		capturedDuration = 0;
+
+		seenSegments.clear();
+
+		pendingSegments.clear();
+
+		nextSegmentSequence = null;
+
+		segmentWriteChain =
+			Promise.resolve();
+
+		lastMediaSequence = null;
+
+        accountId = String(id);
+
+        console.log(
+            `[LiveCapture] Discovering stream for account ${accountId}...`
+        );
+
+        const stream = await getStreamInfo(accountId);
+
+        if (!stream.stream) {
+            throw new Error(
+                'No active stream was returned.'
+            );
+        }
+		
+		console.log('[LiveCapture] Raw stream response:', stream);
+
+		if (!stream.stream.access) {
+			throw new Error(
+				'The current account does not have access to this stream.'
+			);
+		}
+
+        streamId = stream.stream.id;
+        historyId = stream.stream.historyId;
+        masterUrl = stream.stream.playbackUrl;
+
+        if (!masterUrl) {
+            throw new Error(
+                'The stream response did not contain a playback URL.'
+            );
+        }
+
+        console.log(
+            '[LiveCapture] Stream discovered:',
+            {
+                accountId,
+                streamId,
+                historyId,
+                startedAt: stream.stream.startedAt,
+            }
+        );
+
+        console.log(
+            '[LiveCapture] Master playlist:',
+            masterUrl
+        );
+
+		variantUrl = await resolveVariant(masterUrl);
+
+		console.log(
+			'[LiveCapture] Variant playlist:',
+			variantUrl
+		);
+
+		await startMediaBunny();
+
+		running = true;
+		await poll();
+    }
+
+	function downloadSegment(segment)
+	{
+		const promise = new Promise((resolve, reject) => {
+			GM_xmlhttpRequest({
+				method: 'GET',
+				url: segment.url,
+				headers: {
+					'Origin': 'https://fansly.com',
+					'Referer': 'https://fansly.com/',
+				},
+				responseType: 'arraybuffer',
+
+				onload: async response => {
+					if (
+						response.status < 200 ||
+						response.status >= 300
+					) {
+						reject(
+							new Error(
+								`HTTP ${response.status}`
+							)
+						);
+						return;
+					}
+
+					const buffer = response.response;
+
+					if (!(buffer instanceof ArrayBuffer)) {
+						reject(
+							new Error(
+								`Segment #${segment.sequence} ` +
+								`did not return an ArrayBuffer.`
+							)
+						);
+						return;
+					}
+
+					try {
+						await queueSegmentForMediaBunny(
+							segment.sequence,
+							buffer
+						);
+
+						console.log(
+							`[LiveCapture] Segment #${segment.sequence} ` +
+							`fed to MediaBunny.`
+						);
+
+						resolve();
+					} catch (error) {
+						reject(error);
+					}
+				},
+
+				onerror: error => {
+					reject(error);
+				},
+
+				ontimeout: () => {
+					reject(
+						new Error(
+							`Segment #${segment.sequence} timed out`
+						)
+					);
+				},
+
+				onabort: () => {
+					reject(
+						new Error(
+							`Segment #${segment.sequence} aborted`
+						)
+					);
+				},
+			});
+		});
+
+		pendingSegmentDownloads.add(promise);
+
+		promise.finally(() => {
+			pendingSegmentDownloads.delete(promise);
+		});
+
+		promise.catch(error => {
+			console.error(
+				`[LiveCapture] Failed segment #${segment.sequence}:`,
+				error
+			);
+		});
+
+		return promise;
+	}
+
+    /**
+     * Stop monitoring.
+     */
+	async function stop()
+	{
+		if (timer !== null) {
+			clearTimeout(timer);
+			timer = null;
+		}
+
+		if (!running) {
+			return;
+		}
+
+		running = false;
+
+		console.log(
+			'[LiveCapture] Stopped.'
+		);
+
+		console.log(
+			`[LiveCapture] Waiting for ` +
+			`${pendingSegmentDownloads.size} pending segment download(s)...`
+		);
+
+		await Promise.allSettled(
+			[...pendingSegmentDownloads]
+		);
+
+		if (liveStreamWriter) {
+			try {
+				await liveStreamWriter.close();
+
+				console.log(
+					'[LiveCapture] MediaBunny input stream closed.'
+				);
+			} catch (error) {
+				console.error(
+					'[LiveCapture] Failed to close MediaBunny input stream:',
+					error
+				);
+			}
+
+			liveStreamWriter = null;
+		}
+
+		if (liveConversionPromise) {
+			try {
+				await liveConversionPromise;
+
+				console.log(
+					'[LiveCapture] MediaBunny finalization complete.'
+				);
+			} catch (error) {
+				console.error(
+					'[LiveCapture] MediaBunny finalization failed:',
+					error
+				);
+			}
+
+			liveConversionPromise = null;
+		}
+
+		if (liveInput) {
+			try {
+				liveInput.dispose();
+			} catch {
+				// Ignore disposal errors.
+			}
+
+			liveInput = null;
+		}
+	}
+
+    return {
+        start,
+        stop,
+    };
+})();
+
+unsafeWindow.liveCapture = liveCapture;
+
+/**
+ * Fetch a live HLS playlist through GM_xmlhttpRequest.
+ *
+ * This is intentionally separate from the MediaBunny-specific
+ * authenticatedFetch() inside downloadM3u8AsMP4().
+ */
+function fetchLivePlaylist(url)
+{
+    return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url,
+            headers: {
+                'Origin': 'https://fansly.com',
+                'Referer': 'https://fansly.com/',
+            },
+
+            onload: response => {
+                if (response.status < 200 || response.status >= 300) {
+                    reject(
+                        new Error(
+                            `Live playlist request failed: HTTP ${response.status}`
+                        )
+                    );
+                    return;
+                }
+
+                resolve(response.responseText);
+            },
+
+            onerror: error => {
+                reject(
+                    new Error(
+                        'Live playlist request failed.'
+                    )
+                );
+            },
+
+            ontimeout: () => {
+                reject(
+                    new Error(
+                        'Live playlist request timed out.'
+                    )
+                );
+            },
+        });
+    });
 }
 
 /**
