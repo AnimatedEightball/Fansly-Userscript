@@ -950,29 +950,18 @@ async function downloadM3u8AsMP4(
 }
 
 /**
- * Live HLS capture helper.
- *
- * Initial version:
- * - Discovers the current live stream through the Fansly API.
- * - Resolves the master HLS playlist.
- * - Selects the highest-quality video variant.
- * - Polls the live variant playlist.
- * - Reports newly discovered segments.
- *
- * No media is downloaded yet.
+ * Captures a live HLS stream, incrementally feeds media segments
+ * into MediaBunny, and finalizes the capture as a downloadable MP4.
  */
 const liveCapture = (() => {
     let running = false;
     let timer = null;
 
     let accountId = null;
-    let streamId = null;
-    let historyId = null;
 
     let masterUrl = null;
     let variantUrl = null;
 
-    let lastMediaSequence = null;
     const seenSegments = new Set();
 	
 	let liveStreamWriter = null;
@@ -983,14 +972,14 @@ const liveCapture = (() => {
 	const pendingSegmentDownloads = new Set();
 	const pendingSegments = new Map();
 
+	const failedSegments = new Set();
+
 	let nextSegmentSequence = null;
 	let segmentWriteChain = Promise.resolve();
-	
-	const TEST_CAPTURE_DURATION = 60;
 
 	let captureStarted = false;
 	let capturedDuration = 0;
-	
+
     /**
      * Fetch the current live-stream information for an account.
      *
@@ -1171,46 +1160,22 @@ const liveCapture = (() => {
 						);
 
 						if (captureStarted) {
+							if (nextSegmentSequence === null) {
+								nextSegmentSequence = currentSegment.sequence;
+							}
+							
 							downloadSegment(currentSegment);
 
 							capturedDuration += currentSegment.duration;
 
-							console.log(
-								`[LiveCapture] Capture progress: ` +
-								`${capturedDuration.toFixed(1)} / ` +
-								`${TEST_CAPTURE_DURATION}s`
-							);
-
-							if (capturedDuration >= TEST_CAPTURE_DURATION) {
-								console.log(
-									`[LiveCapture] Reached test capture duration ` +
-									`of ${TEST_CAPTURE_DURATION}s.`
-								);
-
-								stop();
-							}
-						}
+						console.log(
+							`[LiveCapture] Capture progress: ` +
+							`${capturedDuration.toFixed(1)}s`
+						);						}
 					}
                     segmentCount++;
                     currentSegment = null;
                 }
-            }
-
-            if (mediaSequence !== null) {
-                if (lastMediaSequence !== null) {
-                    const difference =
-                        mediaSequence - lastMediaSequence;
-
-                    if (difference > 0) {
-                        console.log(
-                            `[LiveCapture] Playlist advanced ` +
-                            `by ${difference} segment(s): ` +
-                            `${lastMediaSequence} → ${mediaSequence}`
-                        );
-                    }
-                }
-
-                lastMediaSequence = mediaSequence;
             }
 
             if (text.includes('#EXT-X-ENDLIST')) {
@@ -1243,218 +1208,6 @@ const liveCapture = (() => {
         }
     }
 	
-	async function finalizeCapture()
-	{
-		if (!capturedSegments.length) {
-			console.warn(
-				'[LiveCapture] No captured segments to finalize.'
-			);
-			return;
-		}
-
-		console.log(
-			`[LiveCapture] Waiting for ` +
-			`${pendingSegmentDownloads.size} pending segment download(s)...`
-		);
-
-		await Promise.allSettled(
-			[...pendingSegmentDownloads]
-		);
-
-		if (!capturedSegments.length) {
-			console.warn(
-				'[LiveCapture] No segments were successfully captured.'
-			);
-			return;
-		}
-
-		capturedSegments.sort(
-			(a, b) => a.sequence - b.sequence
-		);
-
-		console.log(
-			`[LiveCapture] Finalizing ${capturedSegments.length} ` +
-			`MPEG-TS segment(s) with MediaBunny.`
-		);
-
-		const totalBytes = capturedSegments.reduce(
-			(total, segment) =>
-				total + segment.buffer.byteLength,
-			0
-		);
-
-		console.log(
-			`[LiveCapture] Captured size: ` +
-			`${(totalBytes / 1024 / 1024).toFixed(2)} MiB`
-		);
-
-		/*
-		 * Concatenate the MPEG-TS segments into one contiguous
-		 * ArrayBuffer.
-		 */
-		const combined = new Uint8Array(totalBytes);
-
-		let offset = 0;
-
-		for (const segment of capturedSegments) {
-			const bytes = new Uint8Array(segment.buffer);
-
-			combined.set(bytes, offset);
-			offset += bytes.byteLength;
-		}
-
-		const {
-			Input,
-			MPEG_TS,
-			BufferSource,
-			Output,
-			Mp4OutputFormat,
-			BufferTarget,
-			Conversion,
-		} = await mediaBunnyPromise;
-
-		const source = new BufferSource(combined);
-
-		const input = new Input({
-			source,
-			formats: [MPEG_TS],
-		});
-
-		try {
-			const videoTracks =
-				await input.getVideoTracks();
-
-			if (!videoTracks.length) {
-				throw new Error(
-					'MediaBunny found no video tracks in the captured MPEG-TS data.'
-				);
-			}
-
-			const videoTrack = videoTracks[0];
-
-			const duration =
-				await videoTrack.getDurationFromMetadata();
-
-			console.log(
-				`[LiveCapture] MediaBunny detected duration: ` +
-				`${Number.isFinite(duration)
-					? duration.toFixed(2)
-					: 'unknown'}s`
-			);
-
-			const target = new BufferTarget();
-
-			const output = new Output({
-				format: new Mp4OutputFormat(),
-				target,
-			});
-
-			output._muxer.creationTime = 0;
-
-			const conversion = await Conversion.init({
-				input,
-				output,
-
-				tracks: 'primary',
-
-				copy: {
-					mode: 'preferred',
-				},
-
-				video: track => {
-					if (track !== videoTrack) {
-						return {
-							discard: true,
-						};
-					}
-
-					return {};
-				},
-
-				tags: {},
-			});
-
-			if (!conversion.isValid) {
-				const discarded =
-					conversion.discardedTracks
-						.map(item => {
-							return (
-								`${String(item.track)}: ` +
-								`${item.reason}`
-							);
-						})
-						.join('\n');
-
-				throw new Error(
-					`MediaBunny conversion is invalid.\n\n` +
-					`Discarded tracks:\n` +
-					`${discarded || '(none)'}`
-				);
-			}
-
-			conversion.onProgress = progress => {
-				const percent =
-					Math.floor(progress * 100);
-
-				console.log(
-					`[LiveCapture] MediaBunny ${percent}%`
-				);
-			};
-
-			await conversion.execute();
-
-			const buffer = target.buffer;
-
-			if (!buffer) {
-				throw new Error(
-					'MediaBunny completed conversion but produced no output buffer.'
-				);
-			}
-
-			const filename =
-				`fansly-live-test-${Date.now()}.mp4`;
-
-			const file = new File(
-				[buffer],
-				filename,
-				{
-					type: 'video/mp4',
-				}
-			);
-
-			const blobUrl =
-				URL.createObjectURL(file);
-
-			const link =
-				document.createElement('a');
-
-			link.href = blobUrl;
-			link.download = filename;
-			link.style.display = 'none';
-
-			document.body.appendChild(link);
-			link.click();
-			link.remove();
-
-			setTimeout(() => {
-				URL.revokeObjectURL(blobUrl);
-			}, 60_000);
-
-			console.log(
-				`[LiveCapture] MediaBunny produced ` +
-				`${filename} ` +
-				`(${(buffer.byteLength / 1024 / 1024).toFixed(2)} MiB)`
-			);
-
-		} finally {
-			try {
-				input.dispose();
-			} catch {
-				// Ignore disposal errors.
-			}
-		}
-	}
-
 	async function startMediaBunny()
 	{
 		const {
@@ -1559,31 +1312,6 @@ const liveCapture = (() => {
 				);
 			}
 
-			let lastLoggedPercent = -1;
-
-			conversion.onProgress = progress => {
-				/*
-				 * A live source has no known final duration, so
-				 * progress is not expected to behave like a normal
-				 * finite-file conversion.
-				 *
-				 * Keep this for diagnostic purposes only.
-				 */
-				const percent =
-					Math.floor(progress * 100);
-
-				if (
-					percent >= lastLoggedPercent + 5 &&
-					percent <= 100
-				) {
-					lastLoggedPercent = percent;
-
-					console.log(
-						`[LiveCapture] MediaBunny progress: ${percent}%`
-					);
-				}
-			};
-
 			console.log(
 				'[LiveCapture] MediaBunny conversion started.'
 			);
@@ -1649,35 +1377,46 @@ const liveCapture = (() => {
 		);
 	}
 
-	async function queueSegmentForMediaBunny(
-		sequence,
-		buffer
-	) {
-		pendingSegments.set(
-			sequence,
-			new Uint8Array(buffer)
-		);
-
-		/*
-		 * The first successfully downloaded segment establishes
-		 * the starting sequence number for this capture.
-		 */
-		if (nextSegmentSequence === null) {
-			nextSegmentSequence = sequence;
-		}
-
-		/*
-		 * Serialize all writes to MediaBunny.
-		 *
-		 * This is important because multiple GM_xmlhttpRequest()
-		 * calls can complete in a different order than the HLS
-		 * sequence numbers.
-		 */
+	function drainPendingSegments()
+	{
 		segmentWriteChain =
 			segmentWriteChain.then(async () => {
-				while (
-					pendingSegments.has(nextSegmentSequence)
-				) {
+				while (true) {
+					/*
+					 * A permanently failed segment creates a gap in the
+					 * sequence. Skip it so later segments can continue.
+					 */
+					if (
+						failedSegments.has(
+							nextSegmentSequence
+						)
+					) {
+						failedSegments.delete(
+							nextSegmentSequence
+						);
+
+						console.warn(
+							`[LiveCapture] Skipping failed segment ` +
+							`#${nextSegmentSequence}.`
+						);
+
+						nextSegmentSequence++;
+
+						continue;
+					}
+
+					/*
+					 * Stop when the next expected segment has not
+					 * arrived yet.
+					 */
+					if (
+						!pendingSegments.has(
+							nextSegmentSequence
+						)
+					) {
+						break;
+					}
+
 					const bytes =
 						pendingSegments.get(
 							nextSegmentSequence
@@ -1695,8 +1434,11 @@ const liveCapture = (() => {
 
 					if (!liveStreamWriter) {
 						console.warn(
-							`[LiveCapture] Ignoring segment #${nextSegmentSequence} because the MediaBunny writer is no longer active.`
+							`[LiveCapture] Ignoring segment ` +
+							`#${nextSegmentSequence} because the ` +
+							`MediaBunny writer is no longer active.`
 						);
+
 						return;
 					}
 
@@ -1709,7 +1451,26 @@ const liveCapture = (() => {
 		return segmentWriteChain;
 	}
 
-    /**
+
+	function queueSegmentForMediaBunny(
+		sequence,
+		buffer
+	) {
+		pendingSegments.set(
+			sequence,
+			new Uint8Array(buffer)
+		);
+
+		return drainPendingSegments();
+	}
+
+
+	function markSegmentFailed(sequence)
+	{
+		failedSegments.add(sequence);
+
+		return drainPendingSegments();
+	}   /**
      * Start monitoring a live stream.
      *
      * @param {String} id Fansly account ID
@@ -1735,13 +1496,13 @@ const liveCapture = (() => {
 		seenSegments.clear();
 
 		pendingSegments.clear();
+		
+		failedSegments.clear();
 
 		nextSegmentSequence = null;
 
 		segmentWriteChain =
 			Promise.resolve();
-
-		lastMediaSequence = null;
 
         accountId = String(id);
 
@@ -1757,16 +1518,12 @@ const liveCapture = (() => {
             );
         }
 		
-		console.log('[LiveCapture] Raw stream response:', stream);
-
 		if (!stream.stream.access) {
 			throw new Error(
 				'The current account does not have access to this stream.'
 			);
 		}
 
-        streamId = stream.stream.id;
-        historyId = stream.stream.historyId;
         masterUrl = stream.stream.playbackUrl;
 
         if (!masterUrl) {
@@ -1779,8 +1536,6 @@ const liveCapture = (() => {
             '[LiveCapture] Stream discovered:',
             {
                 accountId,
-                streamId,
-                historyId,
                 startedAt: stream.stream.startedAt,
             }
         );
@@ -1805,85 +1560,160 @@ const liveCapture = (() => {
 
 	function downloadSegment(segment)
 	{
+		const MAX_RETRIES = 1;
+		const RETRY_DELAY = 1000;
+		
 		const promise = new Promise((resolve, reject) => {
-			GM_xmlhttpRequest({
-				method: 'GET',
-				url: segment.url,
-				headers: {
-					'Origin': 'https://fansly.com',
-					'Referer': 'https://fansly.com/',
-				},
-				responseType: 'arraybuffer',
+			let attempt = 0;
 
-				onload: async response => {
-					if (
-						response.status < 200 ||
-						response.status >= 300
-					) {
-						reject(
-							new Error(
-								`HTTP ${response.status}`
-							)
-						);
-						return;
-					}
+			const download = () => {
+				GM_xmlhttpRequest({
+					method: 'GET',
+					url: segment.url,
+					headers: {
+						'Origin': 'https://fansly.com',
+						'Referer': 'https://fansly.com/',
+					},
+					responseType: 'arraybuffer',
 
-					const buffer = response.response;
+					onload: async response => {
+						const status = response.status;
 
-					if (!(buffer instanceof ArrayBuffer)) {
+						if (
+							status < 200 ||
+							status >= 300
+						) {
+							const retryable =
+								status === 408 ||
+								status === 429 ||
+								status >= 500;
+
+							if (
+								retryable &&
+								attempt < MAX_RETRIES
+							) {
+								attempt++;
+
+								console.warn(
+									`[LiveCapture] Retrying segment ` +
+									`#${segment.sequence} ` +
+									`(attempt ${attempt + 1}) ` +
+									`after HTTP ${status}.`
+								);
+
+								setTimeout(download, RETRY_DELAY);
+
+								return;
+							}
+
+							markSegmentFailed(segment.sequence);
+
+							reject(
+								new Error(
+									`HTTP ${status}`
+								)
+							);
+
+							return;
+						}
+
+						const buffer = response.response;
+
+						if (!(buffer instanceof ArrayBuffer)) {
+							markSegmentFailed(segment.sequence);
+							
+							reject(
+								new Error(
+									`Segment #${segment.sequence} ` +
+									`did not return an ArrayBuffer.`
+								)
+							);
+
+							return;
+						}
+
+						try {
+							await queueSegmentForMediaBunny(
+								segment.sequence,
+								buffer
+							);
+
+							resolve();
+						} catch (error) {
+							reject(error);
+						}
+					},
+
+					onerror: () => {
+						if (attempt < MAX_RETRIES) {
+							attempt++;
+
+							console.warn(
+								`[LiveCapture] Retrying segment ` +
+								`#${segment.sequence} ` +
+								`(attempt ${attempt + 1}) ` +
+								`after a network error.`
+							);
+
+							setTimeout(download, RETRY_DELAY);
+
+							return;
+						}
+
+						markSegmentFailed(segment.sequence);
+
 						reject(
 							new Error(
 								`Segment #${segment.sequence} ` +
-								`did not return an ArrayBuffer.`
+								`network error`
 							)
 						);
-						return;
-					}
+					},
 
-					try {
-						await queueSegmentForMediaBunny(
-							segment.sequence,
-							buffer
+					ontimeout: () => {
+						if (attempt < MAX_RETRIES) {
+							attempt++;
+
+							console.warn(
+								`[LiveCapture] Retrying segment ` +
+								`#${segment.sequence} ` +
+								`(attempt ${attempt + 1}) ` +
+								`after a timeout.`
+							);
+
+							setTimeout(download, RETRY_DELAY);
+
+							return;
+						}
+						
+						markSegmentFailed(segment.sequence);
+
+						reject(
+							new Error(
+								`Segment #${segment.sequence} timed out`
+							)
 						);
+					},
 
-						console.log(
-							`[LiveCapture] Segment #${segment.sequence} ` +
-							`fed to MediaBunny.`
+					onabort: () => {
+						reject(
+							new Error(
+								`Segment #${segment.sequence} aborted`
+							)
 						);
+					},
+				});
+			};
 
-						resolve();
-					} catch (error) {
-						reject(error);
-					}
-				},
-
-				onerror: error => {
-					reject(error);
-				},
-
-				ontimeout: () => {
-					reject(
-						new Error(
-							`Segment #${segment.sequence} timed out`
-						)
-					);
-				},
-
-				onabort: () => {
-					reject(
-						new Error(
-							`Segment #${segment.sequence} aborted`
-						)
-					);
-				},
-			});
+			download();
 		});
 
 		pendingSegmentDownloads.add(promise);
 
-		promise.finally(() => {
-			pendingSegmentDownloads.delete(promise);
-		});
+		promise.then(
+			() => pendingSegmentDownloads.delete(promise),
+			() => pendingSegmentDownloads.delete(promise)
+		);
 
 		promise.catch(error => {
 			console.error(
