@@ -2724,6 +2724,34 @@ function getDownloadMessageButtons()
     };
 }
 
+//Live Stream Tip Menu Selector
+const liveStreamActionsSelector = '.stream-actions-primary';
+
+/**
+ * Adds download button in the message view
+ */
+function addDownloadLiveButton()
+{
+	const actionsMenu = document.querySelector(liveStreamActionsSelector);
+	if (!actionsMenu) {
+		return;
+	}
+	
+	const button = document.querySelector('#downloadLive');
+
+	if (!button) {
+		const liveButton = createDownloadButton(
+			'downloadLive',
+			`<i _ngcontent-opw-c157="" class="${downloadIconClasses}"></i> <span>Start Record Live</span>`,
+			startDownloadLive,
+			'btn solid-blue action-btn',
+		);
+		
+		//Button height is wrong, can we clone the tip button, and then adapt it instead of hardcoding the additional properties?
+		actionsMenu.prepend(liveButton);
+	}
+}
+
 /**
  * Helpers for dealing with page load, page changing etc.
  */
@@ -3011,15 +3039,88 @@ async function openDownloadMessageModal(button) {
 	button.removeAttribute('disabled');
 }
 
-function createDownloadButton(id, html, clickHandler)
+async function startDownloadLive(button) {
+
+   const paths = getCurrentUrlPaths();
+
+   const username = paths[1];
+   
+   if(username) {
+		const url = `/account?usernames=${username}`;
+		const request = await apiFetch(url);
+		const apiResponse = await request.json();
+
+		if (!apiResponse.success) {
+			console.error(apiResponse);
+			return null;
+		}
+
+		const { response } = apiResponse;
+		const accountId = response[0].id;
+		
+		await liveCapture.start(accountId);
+		setLiveButtonState(button,'stop');
+   }
+}
+
+async function stopDownloadLive(button) {
+
+   const paths = getCurrentUrlPaths();
+
+   const username = paths[1];
+   
+   if(username) {
+		const url = `/account?usernames=${username}`;
+		const request = await apiFetch(url);
+		const apiResponse = await request.json();
+
+		if (!apiResponse.success) {
+			console.error(apiResponse);
+			return null;
+		}
+
+		const { response } = apiResponse;
+		const accountId = response[0].id;
+		
+		await liveCapture.stop(accountId);
+		setLiveButtonState(button,'start');
+   }
+}
+
+function setLiveButtonState(button, state)
+{
+	console.log('[LiveButton] setLiveButtonState argument:', button);
+	console.log('[LiveButton] type:', typeof button);
+	console.log('[LiveButton] is element:', button instanceof HTMLElement);
+
+	if(state == 'stop') {
+		console.log("stop updates?");
+		button.querySelector('span').textContent = 'Stop Record Live';
+		button.classList.add('solid-red');
+		button.clickHandler = stopDownloadLive;
+	} else {
+		console.log("start updates?");
+	    button.querySelector('span').textContent = 'Start Record Live';
+		button.classList.remove('solid-red');
+		button.clickHandler = startDownloadLive;
+	}
+}
+
+function createDownloadButton(id, html, clickHandler, classes)
 {
     const button = document.createElement('div');
     button.innerHTML = html;
     button.setAttribute('id', id);
 
+    button.clickHandler = clickHandler;
+
     button.addEventListener('click', function() {
-        clickHandler(button);
+        button.clickHandler(button);
     });
+
+    if(classes) {
+         button.classList = classes;
+    }
 
     return button;
 }
@@ -3034,7 +3135,8 @@ function handleDomChanges()
     // Ignore irrelevant pages entirely
     if (
         paths[0] !== 'messages' &&
-        paths[0] !== 'post'
+        paths[0] !== 'post' &&
+        paths[0] !== 'live'
     ) {
         return;
     }
@@ -3069,6 +3171,11 @@ function handleDomChanges()
     // Handle message buttons
     if (paths[0] === 'messages' && paths[1]) {
         addDownloadMessageMediaButton();
+    }
+	
+    // Handle message buttons
+    if (paths[0] === 'live' && paths[1]) {
+        addDownloadLiveButton();
     }
 }
 
