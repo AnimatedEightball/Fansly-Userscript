@@ -967,6 +967,10 @@ const liveCapture = (() => {
 	let liveStreamWriter = null;
 	let liveConversionPromise = null;
 	let liveInput = null;
+
+	let liveOutputFileHandle = null;
+	let liveOutputOpfsRoot = null;
+	let liveOutputOpfsFilename = null;
 	
 
 	const pendingSegmentDownloads = new Set();
@@ -1216,9 +1220,32 @@ const liveCapture = (() => {
 			MPEG_TS,
 			Output,
 			Mp4OutputFormat,
-			BufferTarget,
+			StreamTarget,
 			Conversion,
 		} = await mediaBunnyPromise;
+
+		if (!navigator.storage?.getDirectory) {
+			throw new Error(
+				'OPFS is not available in this browser; cannot use StreamTarget for live capture.'
+			);
+		}
+
+		liveOutputOpfsRoot =
+			await navigator.storage.getDirectory();
+
+		liveOutputOpfsFilename =
+			`fansly-live-${Date.now()}.mp4`;
+
+		liveOutputFileHandle =
+			await liveOutputOpfsRoot.getFileHandle(
+				liveOutputOpfsFilename,
+				{
+					create: true,
+				}
+			);
+
+		const liveOutputWritable =
+			await liveOutputFileHandle.createWritable();
 
 		const {
 			writable,
@@ -1239,7 +1266,13 @@ const liveCapture = (() => {
 			formats: [MPEG_TS],
 		});
 
-		const target = new BufferTarget();
+		const target = new StreamTarget(
+			liveOutputWritable,
+			{
+				chunked: true,
+				chunkSize: 16 * 1024 * 1024,
+			}
+		);
 
 		const output = new Output({
 			format: new Mp4OutputFormat(),
@@ -1318,27 +1351,14 @@ const liveCapture = (() => {
 
 			await conversion.execute();
 
-			const buffer = target.buffer;
-
-			if (!buffer) {
-				throw new Error(
-					'MediaBunny completed but produced no MP4 output.'
-				);
-			}
+			const opfsFile =
+				await liveOutputFileHandle.getFile();
 
 			const filename =
 				`fansly-live-${Date.now()}.mp4`;
 
-			const file = new File(
-				[buffer],
-				filename,
-				{
-					type: 'video/mp4',
-				}
-			);
-
 			const blobUrl =
-				URL.createObjectURL(file);
+				URL.createObjectURL(opfsFile);
 
 			const link =
 				document.createElement('a');
@@ -1351,13 +1371,18 @@ const liveCapture = (() => {
 			link.click();
 			link.remove();
 
-			setTimeout(() => {
+			setTimeout(async () => {
 				URL.revokeObjectURL(blobUrl);
+
+				await cleanupOpfsFile(
+					liveOutputOpfsRoot,
+					liveOutputOpfsFilename
+				);
 			}, 60_000);
 
 			console.log(
 				`[LiveCapture] MediaBunny finished ${filename} ` +
-				`(${(buffer.byteLength / 1024 / 1024).toFixed(2)} MiB)`
+				`(${(opfsFile.size / 1024 / 1024).toFixed(2)} MiB)`
 			);
 		})();
 
