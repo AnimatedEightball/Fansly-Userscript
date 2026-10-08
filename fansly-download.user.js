@@ -983,6 +983,8 @@ const liveCapture = (() => {
 
 	let captureStarted = false;
 	let capturedDuration = 0;
+	
+	let onStateChange = null;
 
     /**
      * Fetch the current live-stream information for an account.
@@ -1580,6 +1582,7 @@ const liveCapture = (() => {
 		await startMediaBunny();
 
 		running = true;
+		notifyStateChange('running');
 		await poll();
     }
 
@@ -1749,6 +1752,19 @@ const liveCapture = (() => {
 
 		return promise;
 	}
+	
+	
+	function notifyStateChange(state)
+	{
+		if (onStateChange) {
+			onStateChange(state);
+		}
+	}
+
+	function setStateChangeHandler(handler)
+	{
+		onStateChange = handler;
+	}
 
     /**
      * Stop monitoring.
@@ -1765,6 +1781,7 @@ const liveCapture = (() => {
 		}
 
 		running = false;
+		notifyStateChange('stopped');
 
 		console.log(
 			'[LiveCapture] Stopped.'
@@ -1827,6 +1844,7 @@ const liveCapture = (() => {
     return {
         start,
         stop,
+		setStateChangeHandler,
     };
 })();
 
@@ -3058,8 +3076,19 @@ async function startDownloadLive(button) {
 		const { response } = apiResponse;
 		const accountId = response[0].id;
 		
-		await liveCapture.start(accountId);
-		setLiveButtonState(button,'stop');
+		liveCapture.setStateChangeHandler(state => {
+			if (state === 'running') {
+				setLiveButtonState(button, 'stop');
+			} else if (state === 'stopped') {
+				setLiveButtonState(button, 'start');
+			}
+		});
+		
+		try {
+			await liveCapture.start(accountId);
+		} catch (error) {
+			console.error('[LiveButton] Failed to start live capture:', error);
+		}
    }
 }
 
@@ -3083,23 +3112,16 @@ async function stopDownloadLive(button) {
 		const accountId = response[0].id;
 		
 		await liveCapture.stop(accountId);
-		setLiveButtonState(button,'start');
    }
 }
 
 function setLiveButtonState(button, state)
 {
-	console.log('[LiveButton] setLiveButtonState argument:', button);
-	console.log('[LiveButton] type:', typeof button);
-	console.log('[LiveButton] is element:', button instanceof HTMLElement);
-
 	if(state == 'stop') {
-		console.log("stop updates?");
 		button.querySelector('span').textContent = 'Stop Record Live';
 		button.classList.add('solid-red');
 		button.clickHandler = stopDownloadLive;
 	} else {
-		console.log("start updates?");
 	    button.querySelector('span').textContent = 'Start Record Live';
 		button.classList.remove('solid-red');
 		button.clickHandler = startDownloadLive;
