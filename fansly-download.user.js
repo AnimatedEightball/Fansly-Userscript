@@ -2762,7 +2762,7 @@ function addDownloadLiveButton()
 			'downloadLive',
 			`<i _ngcontent-opw-c157="" class="${downloadIconClasses}"></i> <span>Start Record Live</span>`,
 			startDownloadLive,
-			'btn solid-blue action-btn',
+			'btn solid-green solid-blue action-btn',
 		);
 		
 		//Button height is wrong, can we clone the tip button, and then adapt it instead of hardcoding the additional properties?
@@ -3079,15 +3079,16 @@ async function startDownloadLive(button) {
 		liveCapture.setStateChangeHandler(state => {
 			if (state === 'running') {
 				setLiveButtonState(button, 'stop');
-			} else if (state === 'stopped') {
-				setLiveButtonState(button, 'start');
 			}
 		});
 		
+		setLiveButtonState(button, 'starting');
+
 		try {
 			await liveCapture.start(accountId);
 		} catch (error) {
 			console.error('[LiveButton] Failed to start live capture:', error);
+			setLiveButtonState(button, 'start');
 		}
    }
 }
@@ -3111,7 +3112,11 @@ async function stopDownloadLive(button) {
 		const { response } = apiResponse;
 		const accountId = response[0].id;
 		
+		setLiveButtonState(button, 'stopping');
+
 		await liveCapture.stop(accountId);
+
+		setLiveButtonState(button, 'start');
    }
 }
 
@@ -3121,11 +3126,20 @@ function setLiveButtonState(button, state)
 		button.querySelector('span').textContent = 'Stop Record Live';
 		button.classList.add('solid-red');
 		button.clickHandler = stopDownloadLive;
-	} else {
-	    button.querySelector('span').textContent = 'Start Record Live';
-		button.classList.remove('solid-red');
-		button.clickHandler = startDownloadLive;
-	}
+	} else if(state == 'starting') {
+        button.querySelector('span').textContent = 'Starting...';
+        button.classList.remove('solid-green');
+        button.clickHandler = () => {};
+    } else if(state == 'stopping') {
+        button.querySelector('span').textContent = 'Stopping...';
+        button.classList.remove('solid-red');
+        button.clickHandler = () => {};
+    } else {
+        button.querySelector('span').textContent = 'Start Record Live';
+        button.classList.add('solid-green');
+        button.clickHandler = startDownloadLive;
+    }
+
 }
 
 function createDownloadButton(id, html, clickHandler, classes)
