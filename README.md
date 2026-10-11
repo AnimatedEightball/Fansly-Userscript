@@ -130,3 +130,7 @@ During a download there won't be anything on the Fansly website visually telling
 - Go to your Fansly messages and select a "message thread" on the sidebar.
 - Above the message thread list, there should be a download icon that pops up: https://i.im.ge/2022/08/17/OqDqtc.2022-08-17-nkWxV3.png
 
+---
+
+> [!CAUTION]
+> **Disclaimer**: Use at your own risk. This tool is not affiliated with Fansly or Select Media LLC. The developer of this script is not responsible for the end users' actions or any outcomes that may be taken upon the end users' account.
