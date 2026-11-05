@@ -14,13 +14,13 @@
 // @updateURL   https://github.com/AnimatedEightball/Fansly-Userscript/raw/refs/heads/main/fansly-download.user.js
 // @homepageURL https://github.com/AnimatedEightball/Fansly-Userscript/
 // @icon        https://m.leak.fans/ujs/fansly-icon.png
-// @version     0.9.6
+// @version     0.9.7
 // @author      M&S
 // @description Work in progress userscript for download media of single posts & message media on Fansly.
 // ==/UserScript==
 
 /**
- * Usage, changelog & other information - Please read the README on the GitHub Gist page: https://gist.github.com/M-rcus/a29673a5fcf22afd0e67d549b36496a7
+ * Usage, changelog & other information - Please read the README on the GitHub Gist page: https://github.com/AnimatedEightball/Fansly-Userscript/blob/main/README.md
  */
 
 const downloadIconClasses = 'fal fa-fw fa-file-upload fa-rotate-180 pointer';
@@ -61,6 +61,347 @@ let m3u8MenuCommandId = null;
 let scriptMenuCommandId = null;
 
 const DEBUG = false;
+
+
+/**
+ * Temporarily observe API requests made by the Fansly page.
+ * This does not modify request or response data.
+ */
+function installApiRequestLogger()
+{
+    const page = unsafeWindow;
+
+    // Observe fetch requests.
+    const originalFetch = page.fetch;
+
+    if (!originalFetch.__fanslyObserver) {
+        const observedFetch = function (...args) {
+            const requestUrl = typeof args[0] === 'string'
+                ? args[0]
+                : args[0]?.url;
+
+            if (requestUrl?.includes('/api/v1/')) {
+                console.log('[Fansly API fetch]', requestUrl);
+            }
+
+            return originalFetch.apply(this, args);
+        };
+
+        observedFetch.__fanslyObserver = true;
+        page.fetch = observedFetch;
+    }
+
+    // Observe XMLHttpRequest requests.
+    const xhrPrototype = page.XMLHttpRequest.prototype;
+
+    if (!xhrPrototype.open.__fanslyObserver) {
+        const originalOpen = xhrPrototype.open;
+
+        const observedOpen = function (method, url, ...args) {
+            this.__fanslyRequestUrl = url;
+            this.__fanslyRequestMethod = method;
+
+            return originalOpen.call(this, method, url, ...args);
+        };
+
+        observedOpen.__fanslyObserver = true;
+        xhrPrototype.open = observedOpen;
+    }
+
+    const originalSend = xhrPrototype.send;
+
+    if (!originalSend.__fanslyObserver) {
+        const observedSend = function (...args) {
+            const url = this.__fanslyRequestUrl;
+
+            if (url?.includes('/api/v1/')) {
+                console.log(
+                    '[Fansly API XHR]',
+                    this.__fanslyRequestMethod,
+                    url
+                );
+            }
+
+            return originalSend.apply(this, args);
+        };
+
+        observedSend.__fanslyObserver = true;
+        xhrPrototype.send = observedSend;
+    }
+
+    console.log('[Fansly API observer] Installed');
+}
+function installHomeTimelineObserver()
+{
+    const page = unsafeWindow;
+    const xhrPrototype = page.XMLHttpRequest.prototype;
+
+    if (xhrPrototype.send.__fanslyHomeObserver) {
+        return;
+    }
+
+    const originalSend = xhrPrototype.send;
+
+    const observedSend = function (...args) {
+
+        const xhr = this;
+
+        // Preserve the request URL and method recorded by the
+        // existing XHR request logger, if available.
+        const url = String(xhr.__fanslyRequestUrl || '');
+        const method = String(
+            xhr.__fanslyRequestMethod || ''
+        ).toUpperCase();
+
+		if (
+			method === 'GET' &&
+			(
+				url.includes('/api/v1/timeline/home') ||
+				/\/api\/v1\/timelinenew\/\d+/.test(url) ||
+				/\/api\/v1\/post(?:\?|$)/.test(url)
+			)
+		) {
+            xhr.addEventListener('load', function () {
+
+                if (this.status < 200 || this.status >= 300) {
+                    return;
+                }
+
+                try {
+                    let data;
+
+                    if (this.responseType === 'json') {
+                        data = this.response;
+                    } else {
+                        data = JSON.parse(this.responseText);
+                    }
+
+                    cacheHomeTimelineResponse(data);
+
+                } catch (error) {
+                    console.error(
+                        '[Home cache] Response processing failed:',
+                        error
+                    );
+                }
+            });
+        }
+
+        return Reflect.apply(originalSend, this, args);
+    };
+
+    observedSend.__fanslyHomeObserver = true;
+    xhrPrototype.send = observedSend;
+
+    console.log('[Home cache] XHR observer installed');
+}
+
+// Cache data received from the Fansly home timeline endpoint.
+const homeTimelineCache = {
+    postsById: new Map(),
+    bundlesById: new Map(),
+    accountMediaById: new Map(),
+    postIdsByMediaId: new Map()
+};
+unsafeWindow.homeTimelineCache = homeTimelineCache;
+
+function cacheHomeTimelineResponse(data)
+{
+    // The API response is wrapped in a "response" property.
+    const response = data?.response ?? data;
+
+    if (!response) {
+        console.warn('[Home cache] Empty response');
+        return;
+    }
+
+    const posts = response.posts || [];
+    const bundles = response.accountMediaBundles || [];
+    const accountMedia = response.accountMedia || [];
+
+    // Cache all three collections first.
+    // This is important because the related records may arrive
+    // in different requests as the user scrolls through the feed.
+
+    for (const post of posts) {
+        if (post.id) {
+            homeTimelineCache.postsById.set(
+                String(post.id),
+                post
+            );
+        }
+    }
+
+    for (const bundle of bundles) {
+        if (bundle.id) {
+            homeTimelineCache.bundlesById.set(
+                String(bundle.id),
+                bundle
+            );
+        }
+    }
+
+    for (const media of accountMedia) {
+        if (media.id) {
+            homeTimelineCache.accountMediaById.set(
+                String(media.id),
+                media
+            );
+        }
+    }
+
+     // Rebuild the mediaId -> postId index.
+    homeTimelineCache.postIdsByMediaId.clear();
+
+    const stats = {
+        posts: homeTimelineCache.postsById.size,
+        attachments: 0,
+        bundlesFound: 0,
+        bundlesMissing: 0,
+        accountMediaIds: 0,
+        accountMediaFound: 0,
+        accountMediaMissing: 0,
+        mediaIdsFound: 0,
+        mappingsCreated: 0
+    };
+
+	for (const post of homeTimelineCache.postsById.values()) {
+
+		for (const attachment of post.attachments || []) {
+
+			stats.attachments++;
+
+			const contentId = String(attachment.contentId);
+			let accountMediaIds = [];
+
+			if (attachment.contentType === 1) {
+
+				// contentType 1: contentId directly references accountMedia.
+				accountMediaIds = [contentId];
+
+			} else if (attachment.contentType === 2) {
+
+				// contentType 2: contentId references an accountMediaBundle.
+				const bundle = homeTimelineCache.bundlesById.get(contentId);
+
+				if (!bundle) {
+					stats.bundlesMissing++;
+					continue;
+				}
+
+				stats.bundlesFound++;
+
+				accountMediaIds = bundle.accountMediaIds || [];
+
+			} else {
+				// Unknown attachment type.
+				continue;
+			}
+
+			for (const accountMediaId of accountMediaIds) {
+
+				stats.accountMediaIds++;
+
+				const media = homeTimelineCache.accountMediaById.get(
+					String(accountMediaId)
+				);
+
+				if (!media) {
+					stats.accountMediaMissing++;
+					continue;
+				}
+
+				stats.accountMediaFound++;
+
+				if (!media.mediaId) {
+					continue;
+				}
+
+				stats.mediaIdsFound++;
+
+				const mediaId = String(media.mediaId);
+				const postId = String(post.id);
+
+				if (!homeTimelineCache.postIdsByMediaId.has(mediaId)) {
+					homeTimelineCache.postIdsByMediaId.set(
+						mediaId,
+						new Set()
+					);
+				}
+
+				homeTimelineCache.postIdsByMediaId
+					.get(mediaId)
+					.add(postId);
+
+				stats.mappingsCreated++;
+			}
+		}
+	}
+
+	handleHomeFeedPosts();
+}
+
+// Identify the post represented by a home-feed card.
+function resolveHomeFeedPostId(feedItem)
+{
+    if (!feedItem) {
+        return null;
+    }
+
+    const mediaElements = feedItem.querySelectorAll(
+        'app-media[data-media-id]'
+    );
+
+    if (!mediaElements.length) {
+        return null;
+    }
+
+    let matchingPostIds = null;
+
+    for (const mediaElement of mediaElements) {
+        const mediaId = mediaElement.getAttribute('data-media-id');
+
+        if (!mediaId) {
+            continue;
+        }
+
+        const postIds = homeTimelineCache.postIdsByMediaId.get(
+            String(mediaId)
+        );
+		
+		console.log('[Home feed media lookup]', {
+			mediaId: String(mediaId),
+			mappedPostIds: postIds ? Array.from(postIds) : null
+		});
+
+        // If even one media ID is not indexed, we can't
+        // reliably identify the post from this card yet.
+        if (!postIds || !postIds.size) {
+            return null;
+        }
+
+        if (matchingPostIds === null) {
+            matchingPostIds = new Set(postIds);
+        } else {
+            // Keep only post IDs shared by every media element.
+            matchingPostIds = new Set(
+                [...matchingPostIds].filter(id => postIds.has(id))
+            );
+        }
+
+        if (!matchingPostIds.size) {
+            return null;
+        }
+    }
+
+    // Only return a result when the match is unambiguous.
+    if (matchingPostIds?.size === 1) {
+        return [...matchingPostIds][0];
+    }
+
+    return null;
+}
+unsafeWindow.resolveHomeFeedPostId = resolveHomeFeedPostId;
 
 function debugLog(...args) {
     if (DEBUG) {
@@ -450,15 +791,18 @@ async function downloadM3u8AsMP4(
     fanslyDuration
 ) {
     const {
-        Input,
-        UrlSource,
-        HLS_FORMATS,
-        Output,
-        Mp4OutputFormat,
-        BufferTarget,
-		StreamTarget,
-        Conversion,
-    } = await mediaBunnyPromise;
+			Input,
+			UrlSource,
+			HLS_FORMATS,
+			BufferSource,
+			ReadableStreamSource,
+			MPEG_TS,
+			Output,
+			Mp4OutputFormat,
+			BufferTarget,
+			StreamTarget,
+			Conversion,
+	} = await mediaBunnyPromise;
 
     const cookieHeader = Object.entries(cookies || {})
         .map(([key, value]) => `CloudFront-${key}=${value}`)
@@ -1573,6 +1917,100 @@ async function handleSinglePost(dropdown, postId)
 }
 
 /**
+ * Find the post ID associated with a home-feed card.
+ *
+ * Uses the media ID -> post ID mappings built from the
+ * home timeline responses.
+ */
+function getHomeFeedPostId(card)
+{
+    const mediaElements = card.querySelectorAll(
+        'app-media[data-media-id]'
+    );
+	
+/*
+	console.log('[Home feed] Media elements found:', mediaElements.length,
+		Array.from(mediaElements).map(el => el.getAttribute('data-media-id'))
+	);
+*/
+    for (const mediaElement of mediaElements) {
+        const mediaId = mediaElement.getAttribute('data-media-id');
+
+        const postIds = homeTimelineCache.postIdsByMediaId.get(
+            String(mediaId)
+        );
+
+        if (postIds && postIds.size > 0) {
+            return postIds.values().next().value;
+        }
+    }
+
+    // No downloadable post media was found.
+    return null;
+}
+
+/**
+ * Add a Download Media item to each identifiable home-feed post.
+ */
+function handleHomeFeedPosts()
+{
+    const cards = document.querySelectorAll('app-post.feed-item');
+
+    for (const card of cards) {
+        const postId = getHomeFeedPostId(card);
+
+        // Skip text-only posts and posts that aren't in the cache.
+        if (!postId) {
+            continue;
+        }
+
+        const dropdown = card.querySelector(
+            '.feed-item-actions.dropdown-trigger.more-dropdown > .dropdown-list'
+        );
+
+        if (!dropdown) {
+            continue;
+        }
+
+        // Avoid adding the same item more than once.
+        if (dropdown.querySelector(':scope > .fansly-dl-home-post-btn')) {
+            continue;
+        }
+
+        const btn = document.createElement('div');
+
+        btn.classList.add(
+            'dropdown-item',
+            'fansly-dl-home-post-btn'
+        );
+
+        btn.innerHTML =
+            `<i class="${downloadIconClasses}"></i>Download media`;
+
+        // Copy the Angular scoped-CSS attribute from a direct sibling.
+        const sibling = Array.from(dropdown.children).find(
+            item => item.classList.contains('dropdown-item')
+        );
+
+        if (sibling) {
+            const ngAttr = Array.from(sibling.attributes).find(
+                attr => attr.name.startsWith('_ngcontent')
+            );
+
+            if (ngAttr) {
+                btn.setAttribute(ngAttr.name, '');
+            }
+        }
+
+        btn.addEventListener('click', async () => {
+            await getPost(postId);
+        });
+
+        dropdown.insertAdjacentElement('beforeend', btn);
+    }
+}
+
+/**
  * Fetch messages and cache them during navigation.
  */
 const cachedMessages = {};
@@ -1788,6 +2226,7 @@ function getDownloadMessageButtons()
         menuButton: document.querySelector('#downloadMessagesMenuButton'),
     };
 }
+
 
 /**
  * Helpers for dealing with page load, page changing etc.
@@ -2076,15 +2515,19 @@ async function openDownloadMessageModal(button) {
 	button.removeAttribute('disabled');
 }
 
-function createDownloadButton(id, html, clickHandler)
+function createDownloadButton(id, html, clickHandler, classes)
 {
     const button = document.createElement('div');
     button.innerHTML = html;
     button.setAttribute('id', id);
 
     button.addEventListener('click', function() {
-        clickHandler(button);
+        button.clickHandler(button);
     });
+
+    if(classes) {
+         button.classList = classes;
+    }
 
     return button;
 }
@@ -2096,13 +2539,21 @@ function handleDomChanges()
 {
     const paths = getCurrentUrlPaths();
 
+	const isHomeFeed = paths[0] === '' || paths[0] === 'home';
+	const isUserPostsPage =
+		paths.length >= 2 &&
+		paths[1] === 'posts' &&
+		paths[0] !== '';
+
     // Ignore irrelevant pages entirely
-    if (
-        paths[0] !== 'messages' &&
-        paths[0] !== 'post'
-    ) {
-        return;
-    }
+	if (
+		!isHomeFeed &&
+		!isUserPostsPage &&
+		paths[0] !== 'messages' &&
+		paths[0] !== 'post'
+	) {
+		return;
+	}
 
     const newUrl = location.href;
 
@@ -2122,6 +2573,11 @@ function handleDomChanges()
 
         handleLoad();
     }
+	
+	// Handle downloadable posts on the home feed.
+	if (isHomeFeed || isUserPostsPage) {
+		handleHomeFeedPosts();
+	}
 
     if (paths[0] === 'post' && paths[1]) {
         const dropdown = document.querySelector(postDropdownSelector);
@@ -2167,6 +2623,8 @@ function initObserver()
 }
 
 initObserver();
+installApiRequestLogger();
+installHomeTimelineObserver();
 
 function downloadMessages(messages, groupId)
 {
