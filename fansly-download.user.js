@@ -791,18 +791,15 @@ async function downloadM3u8AsMP4(
     fanslyDuration
 ) {
     const {
-			Input,
-			UrlSource,
-			HLS_FORMATS,
-			BufferSource,
-			ReadableStreamSource,
-			MPEG_TS,
-			Output,
-			Mp4OutputFormat,
-			BufferTarget,
-			StreamTarget,
-			Conversion,
-	} = await mediaBunnyPromise;
+        Input,
+        UrlSource,
+        HLS_FORMATS,
+        Output,
+        Mp4OutputFormat,
+        BufferTarget,
+		StreamTarget,
+        Conversion,
+    } = await mediaBunnyPromise;
 
     const cookieHeader = Object.entries(cookies || {})
         .map(([key, value]) => `CloudFront-${key}=${value}`)
